@@ -11,8 +11,11 @@ def generate_report(host, open_ports, header_results, redirect_results):
         f.write("OPEN PORTS\n")
         f.write("-" * 20 + "\n")
         if open_ports:
-            for port in open_ports:
-                f.write(f"[OPEN] Port {port}\n")
+            for entry in open_ports:
+                if entry["banner"]:
+                    f.write(f"[OPEN] Port {entry['port']} — {entry['banner'][:100]}\n")
+                else:
+                    f.write(f"[OPEN] Port {entry['port']} — no banner\n")
         else:
             f.write("No open ports found.\n")
 

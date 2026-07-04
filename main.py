@@ -19,7 +19,11 @@ def main():
     
     print(f"[*] Scanning ports...")
     open_ports = scan_ports(host, ports)
-    print(f"[+] Open ports found: {open_ports}")
+    for entry in open_ports:
+        if entry["banner"]:
+            print(f"[+] Port {entry['port']} open — {entry['banner'][:50]}")
+        else:
+            print(f"[+] Port {entry['port']} open — no banner")
 
     print("[*] Checking HTTP security headers...")
     header_results = check_headers(f"http://{host}")
