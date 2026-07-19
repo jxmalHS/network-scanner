@@ -7,6 +7,7 @@ A command line tool that scans a target host for common security vulnerabilities
 - **Open ports** — identifies which ports are accepting connections and grabs service banners to identify running software and versions
 - **HTTP security headers** — checks for missing headers that leave users exposed to common attacks
 - **Open redirects** — tests whether the server blindly follows external redirect parameters
+- **SSL/TLS certificate** — checks whether HTTPS is enabled, validates the certificate expiry date, and flags expired or domain-mismatched certificates
 
 ## Installation
 
