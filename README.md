@@ -13,31 +13,40 @@ A command line tool that scans a target host for common security vulnerabilities
 
 Clone the repository and install dependencies:
 
-git clone https://github.com/yourusername/network-scanner.git;
-cd network-scanner;
-python -m venv venv;
-venv\Scripts\activate;
-pip install -r requirements.txt;
+```powershell
+git clone https://github.com/jxmalHS/network-scanner.git
+cd network-scanner
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+```
 
 ## Usage
 
 Basic scan using common ports:
 
+```powershell
 python main.py <host>
+```
 
 Scan specific ports:
 
+```powershell
 python main.py <host> --ports 80 443 22
+```
 
 ## Example
 
+```powershell
 python main.py scanme.nmap.org
+```
 
 ## Project Structure
 
 - `scanner.py` — TCP port scanning with service banner grabbing
 - `headers.py` — HTTP security header checks
 - `redirects.py` — open redirect detection
+- `ssl_checker.py` — SSL/TLS certificate checks (expiry, issuer, domain match)
 - `reporter.py` — generates timestamped report files
 - `main.py` — CLI interface
 
