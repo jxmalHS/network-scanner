@@ -107,23 +107,98 @@ def test_check_ssl_wildcard_matches_subdomain() -> None:
         assert ssl_checker.check_ssl("www.example.com")["domain_match"] is True
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="backlog item 4: any wildcard CN is accepted as a domain match"
-)
 def test_check_ssl_wildcard_for_other_domain_does_not_match() -> None:
     """*.other.org must NOT count as a match for example.com."""
     with _serve_cert(_cert(cn="*.other.org")):
         assert ssl_checker.check_ssl("example.com")["domain_match"] is False
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="backlog item 4: Subject Alternative Names are not checked"
-)
 def test_check_ssl_matches_host_listed_in_san() -> None:
     """A host listed in subjectAltName should match even if the CN differs."""
     cert = _cert(cn="other.org", subjectAltName=(("DNS", "other.org"), ("DNS", "example.com")))
     with _serve_cert(cert):
         assert ssl_checker.check_ssl("example.com")["domain_match"] is True
+
+
+def test_check_ssl_wildcard_cn_does_not_match_bare_domain() -> None:
+    """*.example.com needs one extra label, so it does not cover example.com itself."""
+    with _serve_cert(_cert(cn="*.example.com")):
+        assert ssl_checker.check_ssl("example.com")["domain_match"] is False
+
+
+def test_check_ssl_wildcard_cn_does_not_match_two_levels_down() -> None:
+    """*.example.com covers only one label, so a.b.example.com is not a match."""
+    with _serve_cert(_cert(cn="*.example.com")):
+        assert ssl_checker.check_ssl("a.b.example.com")["domain_match"] is False
+
+
+def test_check_ssl_domain_match_is_case_insensitive() -> None:
+    """DNS names are case-insensitive: WWW.Example.COM matches a CN of www.example.com."""
+    with _serve_cert(_cert(cn="www.example.com")):
+        assert ssl_checker.check_ssl("WWW.Example.COM")["domain_match"] is True
+
+
+def test_check_ssl_san_list_overrides_matching_cn() -> None:
+    """When a SAN list exists the CN is ignored, even if the CN equals the host."""
+    cert = _cert(cn="example.com", subjectAltName=(("DNS", "other.org"), ("DNS", "www.other.org")))
+    with _serve_cert(cert):
+        assert ssl_checker.check_ssl("example.com")["domain_match"] is False
+
+
+def test_check_ssl_wildcard_in_san_matches_subdomain() -> None:
+    """A wildcard entry inside subjectAltName covers a one-label subdomain."""
+    cert = _cert(cn="other.org", subjectAltName=(("DNS", "other.org"), ("DNS", "*.example.com")))
+    with _serve_cert(cert):
+        assert ssl_checker.check_ssl("www.example.com")["domain_match"] is True
+
+
+def test_check_ssl_ignores_non_dns_san_entries() -> None:
+    """IP Address SAN entries are skipped, so a SAN list with no DNS names falls back to the CN."""
+    cert = _cert(cn="example.com", subjectAltName=(("IP Address", "1.2.3.4"),))
+    with _serve_cert(cert):
+        assert ssl_checker.check_ssl("example.com")["domain_match"] is True
+
+
+def test_check_ssl_ip_target_matches_ip_san() -> None:
+    """Scanning by IP matches the certificate's IP Address entry (e.g. a lab VM)."""
+    cert = _cert(cn="other.org", subjectAltName=(("IP Address", "1.2.3.4"), ("DNS", "other.org")))
+    with _serve_cert(cert):
+        assert ssl_checker.check_ssl("1.2.3.4")["domain_match"] is True
+
+
+def test_check_ssl_ip_target_does_not_match_dns_only_cert() -> None:
+    """An IP target never matches DNS names or the CN, even if the CN is that IP."""
+    cert = _cert(cn="1.2.3.4", subjectAltName=(("DNS", "1.2.3.4"),))
+    with _serve_cert(cert):
+        assert ssl_checker.check_ssl("1.2.3.4")["domain_match"] is False
+
+
+def test_check_ssl_ipv6_target_matches_differently_written_san() -> None:
+    """Two spellings of the same IPv6 address count as equal (SAN value may end in a newline)."""
+    cert = _cert(subjectAltName=(("IP Address", "2001:DB8:0:0:0:0:0:1\n"),))
+    with _serve_cert(cert):
+        assert ssl_checker.check_ssl("2001:db8::1")["domain_match"] is True
+
+
+@pytest.mark.parametrize(
+    ("pattern", "host", "expected"),
+    [
+        ("example.com", "example.com", True),
+        ("example.com", "www.example.com", False),
+        ("*.example.com", "www.example.com", True),
+        ("*.example.com", "example.com", False),
+        ("*.example.com", "a.b.example.com", False),
+        ("*.example.com", "wwwexample.com", False),
+        ("*.Example.COM", "WWW.example.com", True),
+        ("", "example.com", False),
+        ("example.com", "example.com.", True),
+        ("*.example.com", "www.example.com.", True),
+        ("*.com", "example.com", False),
+    ],
+)
+def test_name_matches(pattern: str, host: str, expected: bool) -> None:
+    """_name_matches handles exact names, one-label wildcards and letter case."""
+    assert ssl_checker._name_matches(pattern, host) is expected
 
 
 def test_check_ssl_missing_names_default_to_unknown() -> None:
