@@ -253,3 +253,53 @@ def test_check_ssl_emits_no_deprecation_warning() -> None:
     deprecations = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
     assert deprecations == []
     assert "error" not in result
+
+
+def _verify_error(code: int | None) -> ssl.SSLCertVerificationError:
+    """A cert-verify error like Python raises; verify_code is only set if code is not None."""
+    error = ssl.SSLCertVerificationError(1, "certificate verify failed: test reason")
+    if code is not None:
+        error.verify_code = code
+    return error
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (62, "hostname_mismatch"),
+        (64, "hostname_mismatch"),
+        (10, "expired"),
+        (9, "not_yet_valid"),
+        (2, "untrusted"),
+        (18, "untrusted"),
+        (19, "untrusted"),
+        (20, "untrusted"),
+        (21, "untrusted"),
+        (999, "invalid"),
+        (None, "invalid"),
+    ],
+    ids=["62", "64", "10", "9", "2", "18", "19", "20", "21", "unknown-999", "no-verify-code"],
+)
+def test_check_ssl_maps_verify_code_to_cert_problem(code: int | None, expected: str) -> None:
+    """Each OpenSSL verify code becomes the right cert_problem word, and 'error' is kept."""
+    context = MagicMock()
+    context.wrap_socket.side_effect = _verify_error(code)
+    with patch("ssl_checker.ssl.create_default_context", return_value=context), patch(
+        "ssl_checker.socket.create_connection"
+    ):
+        result = ssl_checker.check_ssl("example.com")
+    assert result["cert_problem"] == expected
+    assert "certificate verify failed: test reason" in result["error"]
+
+
+def test_check_ssl_prefers_short_verify_message() -> None:
+    """When Python provides OpenSSL's short reason, 'error' uses it instead of the noisy full text."""
+    error = _verify_error(18)
+    error.verify_message = "self-signed certificate"
+    context = MagicMock()
+    context.wrap_socket.side_effect = error
+    with patch("ssl_checker.ssl.create_default_context", return_value=context), patch(
+        "ssl_checker.socket.create_connection"
+    ):
+        result = ssl_checker.check_ssl("example.com")
+    assert result["error"] == "self-signed certificate"

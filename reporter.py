@@ -1,5 +1,14 @@
 from datetime import datetime
 
+# Plain-English reason for each cert_problem word from ssl_checker.
+CERT_PROBLEM_TEXT = {
+    "hostname_mismatch": "name does not match the host",
+    "expired": "has expired",
+    "not_yet_valid": "is not valid yet",
+    "untrusted": "is not from a trusted issuer (self-signed or unknown)",
+    "invalid": "failed verification",
+}
+
 def generate_report(host, open_ports, header_results, redirect_results, ssl_results):
 
     filename = f"report_{host}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -41,7 +50,11 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
 
         f.write("\nSSL/TLS CERTIFICATE\n")
         f.write("-" * 20 + "\n")
-        if "error" in ssl_results:
+        if "cert_problem" in ssl_results:
+            reason = CERT_PROBLEM_TEXT.get(ssl_results['cert_problem'], CERT_PROBLEM_TEXT["invalid"])
+            f.write(f"[CRITICAL] Certificate rejected: {reason}\n")
+            f.write(f"Details: {ssl_results.get('error', 'no details')}\n")
+        elif "error" in ssl_results:
             if "10061" in str(ssl_results['error']) or "refused" in str(ssl_results['error']).lower():
                 f.write("[CRITICAL] Port 443 is closed — HTTPS is not enabled on this server\n")
             else:

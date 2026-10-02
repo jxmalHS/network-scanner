@@ -168,3 +168,40 @@ def test_generate_report_is_utf8_encoded() -> None:
     """The report bytes should decode as UTF-8 so the em dash displays correctly."""
     filename = reporter.generate_report("example.com", [{"port": 22, "banner": None}], NO_HEADERS, [], VALID_SSL)
     assert "—" in Path(filename).read_bytes().decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("problem", "phrase"),
+    [
+        ("hostname_mismatch", "name does not match the host"),
+        ("expired", "has expired"),
+        ("not_yet_valid", "is not valid yet"),
+        ("untrusted", "is not from a trusted issuer (self-signed or unknown)"),
+        ("invalid", "failed verification"),
+        ("something_new", "failed verification"),  # unknown word -> fallback phrase
+    ],
+)
+def test_generate_report_cert_problem_writes_critical_and_details(problem: str, phrase: str) -> None:
+    """A cert_problem result prints the [CRITICAL] reason line followed by a Details line."""
+    text = _report(ssl_results={"error": "certificate verify failed", "cert_problem": problem})
+    expected = (
+        f"[CRITICAL] Certificate rejected: {phrase}\n"
+        "Details: certificate verify failed\n"
+    )
+    assert expected in text
+
+
+def test_generate_report_cert_problem_skips_generic_error_lines() -> None:
+    """A cert_problem result must not also print the generic error or port-443-closed lines."""
+    # The error text mentions "refused" on purpose: the old branch would treat it as port closed.
+    text = _report(ssl_results={"error": "peer refused: certificate verify failed",
+                                "cert_problem": "untrusted"})
+    assert "Error checking SSL" not in text
+    assert "Port 443 is closed" not in text
+    assert "[CRITICAL] Certificate rejected:" in text
+
+
+def test_generate_report_cert_problem_without_error_text_does_not_crash() -> None:
+    """A cert_problem with no 'error' key still writes the report, with 'no details'."""
+    text = _report(ssl_results={"cert_problem": "expired"})
+    assert "[CRITICAL] Certificate rejected: has expired\nDetails: no details\n" in text

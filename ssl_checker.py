@@ -37,6 +37,28 @@ def _domain_matches(cert: dict, host: str, issued_to: str) -> bool:
     return any(_name_matches(name, host) for name in names)
 
 
+# OpenSSL's verify error numbers -> one plain word for the reporter.
+# OpenSSL stops at the first problem it finds, so only one is reported
+# (e.g. a self-signed AND expired certificate shows as "untrusted").
+_CERT_PROBLEMS = {
+    62: "hostname_mismatch",
+    64: "hostname_mismatch",   # IP address mismatch (target was an IP)
+    10: "expired",
+    9: "not_yet_valid",
+    2: "untrusted",    # issuer certificate not found
+    18: "untrusted",   # self-signed certificate
+    19: "untrusted",   # self-signed certificate in the chain
+    20: "untrusted",   # issuer not known
+    21: "untrusted",   # chain can't be checked
+}
+
+
+def _cert_problem(error: ssl.SSLCertVerificationError) -> str:
+    """Turn a rejected-certificate error into one word ("invalid" if unknown)."""
+    code = getattr(error, "verify_code", None)
+    return _CERT_PROBLEMS.get(code, "invalid")
+
+
 def check_ssl(host):
     context = ssl.create_default_context()
     try:
@@ -69,5 +91,9 @@ def check_ssl(host):
                     "expiring_soon": expiring_soon,
                     "domain_match": domain_match
                 }
+    except ssl.SSLCertVerificationError as e:
+        # verify_message is OpenSSL's short reason; hand-built errors don't have it.
+        return {"error": getattr(e, "verify_message", None) or str(e),
+                "cert_problem": _cert_problem(e)}
     except Exception as e:
         return {"error": str(e)}
