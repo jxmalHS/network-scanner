@@ -170,13 +170,11 @@ def test_check_ssl_verification_failure_returns_error() -> None:
     assert "certificate verify failed" in result["error"]
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="backlog item 3: datetime.utcnow() is deprecated since Python 3.12"
-)
 def test_check_ssl_emits_no_deprecation_warning() -> None:
     """check_ssl should not trigger any DeprecationWarning (e.g. from datetime.utcnow())."""
     with _serve_cert(_cert()), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DeprecationWarning)
-        ssl_checker.check_ssl("example.com")
+        result = ssl_checker.check_ssl("example.com")
     deprecations = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
     assert deprecations == []
+    assert "error" not in result

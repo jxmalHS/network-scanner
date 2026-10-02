@@ -1,6 +1,6 @@
 import ssl
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def check_ssl(host):
@@ -16,8 +16,10 @@ def check_ssl(host):
                 issuer = dict(x[0] for x in cert["issuer"])
                 issued_by = issuer.get("organizationName", "Unknown")
 
-                expire_date = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
-                days_remaining = (expire_date - datetime.utcnow()).days
+                expire_date = datetime.strptime(
+                    cert["notAfter"], "%b %d %H:%M:%S %Y %Z"
+                ).replace(tzinfo=timezone.utc)
+                days_remaining = (expire_date - datetime.now(timezone.utc)).days
 
                 expired = days_remaining < 0
                 expiring_soon = 0 <= days_remaining <= 30
