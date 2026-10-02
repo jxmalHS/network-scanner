@@ -1,17 +1,16 @@
 import socket
 
 def scan_port(host, port):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
-    result = sock.connect_ex((host, port))
-    banner = None
-    if result == 0:
-        try:
-            sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
-            banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
-        except OSError:
-            pass
-    sock.close()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        result = sock.connect_ex((host, port))
+        banner = None
+        if result == 0:
+            try:
+                sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
+                banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
+            except OSError:
+                pass
     return result == 0, banner
 
 def scan_ports(host, ports):

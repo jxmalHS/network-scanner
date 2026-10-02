@@ -10,6 +10,13 @@ import scanner
 def _fake_socket(connect_result: int, recv: bytes | BaseException = b"") -> MagicMock:
     """Build a stand-in socket whose connect_ex/recv return what the test needs."""
     sock = MagicMock()
+    # Behave like a real socket in a `with` block: enter returns itself, exit closes it.
+    def _exit(*exc_info: object) -> bool:
+        sock.close()
+        return False  # False = don't swallow the exception, like a real socket
+
+    sock.__enter__.return_value = sock
+    sock.__exit__.side_effect = _exit
     sock.connect_ex.return_value = connect_result
     if isinstance(recv, BaseException):
         sock.recv.side_effect = recv
@@ -114,6 +121,15 @@ def test_scan_port_closes_socket_when_closed() -> None:
     sock = _fake_socket(10061)
     with patch("scanner.socket.socket", return_value=sock):
         scanner.scan_port("127.0.0.1", 80)
+    sock.close.assert_called_once()
+
+
+def test_scan_port_closes_socket_on_keyboard_interrupt() -> None:
+    """Ctrl+C during the banner grab still closes the socket (backlog #10)."""
+    sock = _fake_socket(0, KeyboardInterrupt())
+    with patch("scanner.socket.socket", return_value=sock):
+        with pytest.raises(KeyboardInterrupt):
+            scanner.scan_port("127.0.0.1", 80)
     sock.close.assert_called_once()
 
 
