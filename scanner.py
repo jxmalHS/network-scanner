@@ -9,7 +9,7 @@ def scan_port(host, port):
         try:
             sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
             banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
-        except:
+        except OSError:
             pass
     sock.close()
     return result == 0, banner
