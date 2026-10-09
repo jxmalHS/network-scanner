@@ -35,10 +35,23 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
         if "error" in header_results:
             f.write(f"Error fetching headers: {header_results['error']}\n")
         else:
+            if "url" in header_results:
+                f.write(f"Checked: {header_results['url']}\n")
+            if "https_error" in header_results:
+                kind = "TLS problem" if header_results.get("https_tls_problem") else "could not connect"
+                f.write(f"[WARNING] HTTPS attempt failed ({kind}) — fell back to http://\n")
+                f.write(f"Details: {header_results['https_error']}\n")
+            if "downgraded_from" in header_results:
+                f.write(f"[WARNING] HTTPS redirected to plain HTTP "
+                        f"({header_results['downgraded_from']} -> {header_results['url']})\n")
+            if "offsite_redirect" in header_results:
+                f.write(f"[INFO] Redirect to another host not followed: {header_results['offsite_redirect']}\n")
             for header in header_results["present"]:
                 f.write(f"[PRESENT] {header}\n")
             for header in header_results["missing"]:
                 f.write(f"[MISSING] {header}\n")
+            for header in header_results.get("not_applicable", []):
+                f.write(f"[N/A] {header} (only counts over HTTPS)\n")
 
         f.write("\nOPEN REDIRECT CHECK\n")
         f.write("-" * 20 + "\n")

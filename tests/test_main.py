@@ -1,4 +1,5 @@
 """Tests for main.py - argparse handling and wiring of the checks (every check mocked)."""
+import argparse
 from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
@@ -76,10 +77,10 @@ def test_main_runs_redirect_and_ssl_checks_on_host(
     checks["check_ssl"].assert_called_once_with("localhost")
 
 
-def test_main_checks_headers_on_http_url(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
-    """The header check receives the host as an http:// URL (not the bare host)."""
+def test_main_checks_headers_on_bare_host(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
+    """The header check receives the bare host; headers.py decides https:// vs http:// itself."""
     _run(monkeypatch, "localhost")
-    checks["check_headers"].assert_called_once_with("http://localhost")
+    checks["check_headers"].assert_called_once_with("localhost")
 
 
 def test_main_prints_progress_and_results(
@@ -95,11 +96,56 @@ def test_main_prints_progress_and_results(
     assert "[+] Report saved to report.txt" in out
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="backlog item 5: headers are only checked over plain http://"
-)
-def test_main_checks_headers_over_https(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
-    """Security headers (especially HSTS) should be checked on the https:// URL."""
+def test_main_prints_security_headers_progress(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """The header step announces itself as 'security headers' (no longer 'HTTP')."""
     _run(monkeypatch, "localhost")
-    urls = [call.args[0] for call in checks["check_headers"].call_args_list]
-    assert "https://localhost" in urls
+    assert "[*] Checking security headers...\n" in capsys.readouterr().out
+
+
+# --- valid_host: which targets argparse accepts ------------------------------
+
+GOOD_HOSTS = ["localhost", "scanme.nmap.org", "192.168.56.101", "::1"]
+BAD_HOSTS = ["site.com@other.com", "site.com/path", "host:8080", "a b", ""]
+
+
+@pytest.mark.parametrize("host", GOOD_HOSTS)
+def test_valid_host_accepts_plain_hosts_and_ips(host: str) -> None:
+    """Plain hostnames and IPv4/IPv6 literals are returned unchanged."""
+    assert main_module.valid_host(host) == host
+
+
+@pytest.mark.parametrize("host", BAD_HOSTS)
+def test_valid_host_rejects_unsafe_values(host: str) -> None:
+    """Anything with @, /, a port, a space, or nothing at all raises ArgumentTypeError."""
+    with pytest.raises(argparse.ArgumentTypeError):
+        main_module.valid_host(host)
+
+
+def test_valid_host_rejects_name_longer_than_253_chars() -> None:
+    """A hostname over 253 characters (the DNS limit) is rejected; exactly 253 is fine."""
+    assert main_module.valid_host("a" * 253) == "a" * 253
+    with pytest.raises(argparse.ArgumentTypeError):
+        main_module.valid_host("a" * 254)
+
+
+@pytest.mark.parametrize("host", GOOD_HOSTS)
+def test_main_accepts_good_host_and_runs_checks(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], host: str
+) -> None:
+    """Through the real CLI, a good host reaches every check unchanged."""
+    _run(monkeypatch, host)
+    checks["check_headers"].assert_called_once_with(host)
+
+
+@pytest.mark.parametrize("host", BAD_HOSTS)
+def test_main_rejects_bad_host_with_exit_code_2(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], host: str
+) -> None:
+    """Through the real CLI, a bad host makes argparse exit with code 2 before any check runs."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, host)
+    assert exc.value.code == 2
+    for mock in checks.values():
+        mock.assert_not_called()

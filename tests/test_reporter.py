@@ -101,6 +101,107 @@ def test_generate_report_header_error() -> None:
     assert "Error fetching headers: timed out\n" in text
 
 
+def test_generate_report_header_error_skips_https_warning() -> None:
+    """When both HTTPS and HTTP failed, only the error line is written, not the fallback warning."""
+    text = _report(header_results={"error": "80 refused", "https_error": "443 refused"})
+    assert "Error fetching headers: 80 refused\n" in text
+    assert "HTTPS attempt failed" not in text
+
+
+def test_generate_report_writes_checked_url() -> None:
+    """A result with a 'url' key gets a 'Checked: <url>' line."""
+    text = _report(header_results={"url": "https://example.com/", "present": [], "missing": []})
+    assert "Checked: https://example.com/\n" in text
+
+
+def test_generate_report_https_fallback_warning_connection_failure() -> None:
+    """https_error without the TLS flag: 'could not connect' warning followed by a Details line."""
+    text = _report(header_results={
+        "url": "http://example.com", "https_error": "443 refused",
+        "present": [], "missing": [], "not_applicable": ["Strict-Transport-Security"],
+    })
+    assert (
+        "[WARNING] HTTPS attempt failed (could not connect) — fell back to http://\n"
+        "Details: 443 refused\n"
+    ) in text
+
+
+def test_generate_report_https_fallback_warning_certificate_problem() -> None:
+    """https_error with https_tls_problem: 'TLS problem' warning followed by a Details line."""
+    text = _report(header_results={
+        "url": "http://example.com", "https_error": "certificate verify failed",
+        "https_tls_problem": True,
+        "present": [], "missing": [], "not_applicable": ["Strict-Transport-Security"],
+    })
+    assert (
+        "[WARNING] HTTPS attempt failed (TLS problem) — fell back to http://\n"
+        "Details: certificate verify failed\n"
+    ) in text
+
+
+def test_generate_report_downgrade_warning() -> None:
+    """A downgraded_from key produces the HTTPS-to-plain-HTTP warning with both URLs."""
+    text = _report(header_results={
+        "url": "http://example.com/", "downgraded_from": "https://example.com",
+        "present": [], "missing": [], "not_applicable": ["Strict-Transport-Security"],
+    })
+    assert "[WARNING] HTTPS redirected to plain HTTP (https://example.com -> http://example.com/)\n" in text
+
+
+def test_generate_report_offsite_redirect_info() -> None:
+    """An offsite_redirect key produces an [INFO] line naming the URL that was not followed."""
+    text = _report(header_results={
+        "url": "https://example.com", "offsite_redirect": "https://other.example.net/",
+        "present": [], "missing": [], "not_applicable": [],
+    })
+    assert "[INFO] Redirect to another host not followed: https://other.example.net/\n" in text
+
+
+def test_generate_report_no_redirect_lines_normally() -> None:
+    """Without downgraded_from / offsite_redirect, neither redirect line is written."""
+    text = _report(header_results={
+        "url": "https://example.com", "present": [], "missing": [], "not_applicable": [],
+    })
+    assert "HTTPS redirected to plain HTTP" not in text
+    assert "[INFO] Redirect to another host" not in text
+
+
+def test_generate_report_no_https_warning_without_https_error() -> None:
+    """Without 'https_error', the fallback warning is not written."""
+    text = _report(header_results={"url": "https://example.com/", "present": [], "missing": []})
+    assert "HTTPS attempt failed" not in text
+
+
+def test_generate_report_lists_not_applicable_headers() -> None:
+    """Each not_applicable header gets an [N/A] line explaining it only counts over HTTPS."""
+    text = _report(header_results={
+        "url": "http://example.com/", "present": [], "missing": [],
+        "not_applicable": ["Strict-Transport-Security"],
+    })
+    assert "[N/A] Strict-Transport-Security (only counts over HTTPS)\n" in text
+
+
+def test_generate_report_header_lines_in_order() -> None:
+    """Checked, WARNING, PRESENT, MISSING and N/A lines appear in that order."""
+    text = _report(header_results={
+        "url": "http://example.com/", "https_error": "refused",
+        "present": ["X-Frame-Options"], "missing": ["Referrer-Policy"],
+        "not_applicable": ["Strict-Transport-Security"],
+    })
+    markers = ("Checked:", "[WARNING] HTTPS", "[PRESENT]", "[MISSING]", "[N/A]")
+    positions = [text.index(m) for m in markers]
+    assert positions == sorted(positions)
+
+
+def test_generate_report_old_style_header_result_still_works() -> None:
+    """An old-style result with only present/missing renders, with no Checked/WARNING/N/A lines."""
+    text = _report(header_results={"present": [], "missing": ["Strict-Transport-Security"]})
+    assert "[MISSING] Strict-Transport-Security\n" in text
+    assert "Checked:" not in text
+    assert "HTTPS attempt failed" not in text
+    assert "[N/A]" not in text
+
+
 def test_generate_report_lists_vulnerable_redirects() -> None:
     """Each vulnerable redirect URL is written with [VULNERABLE]."""
     url = "http://example.com?next=http://evil.com"
