@@ -291,6 +291,39 @@ def test_fetch_error_during_redirect_hop_returns_error() -> None:
     assert result == {"error": "timed out"}
 
 
+def test_fetch_garbled_location_returns_error() -> None:
+    """Location 'http://[oops' makes urljoin raise ValueError; _fetch returns an error dict."""
+    hop = _response({}, location="http://[oops")
+    with patch("headers.requests.get", return_value=hop):
+        result = headers._fetch("https://example.com")
+    assert set(result) == {"error"}
+    assert result["error"]   # some non-empty message from the ValueError
+
+
+def test_check_headers_garbled_location_on_https_falls_back_to_http() -> None:
+    """HTTPS answers with a garbled redirect: no crash, the HTTP fallback is used and
+    the garbled-Location problem is kept as https_error."""
+    hop = _response({}, location="http://[oops")
+    with patch("headers.requests.get", side_effect=[hop, _response({})]) as fake_get:
+        result = headers.check_headers("example.com")
+    assert fake_get.call_args_list == [
+        _get_call("https://example.com"),
+        _get_call("http://example.com"),
+    ]
+    assert result["url"] == "http://example.com"
+    assert result["https_error"]
+    assert "error" not in result
+    assert "https_tls_problem" not in result
+
+
+def test_check_headers_garbled_location_on_both_schemes_returns_error() -> None:
+    """Both HTTPS and HTTP send the garbled redirect: result is an error dict, not an exception."""
+    hop = _response({}, location="http://[oops")
+    with patch("headers.requests.get", side_effect=[hop, hop]):
+        result = headers.check_headers("example.com")
+    assert set(result) == {"error", "https_error"}
+
+
 # --- HTTPS fails, HTTP fallback ----------------------------------------------
 
 def test_check_headers_falls_back_to_http_on_connection_error() -> None:
