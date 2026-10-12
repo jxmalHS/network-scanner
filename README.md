@@ -35,6 +35,12 @@ Scan specific ports:
 python main.py <host> --ports 80 443 22
 ```
 
+Check more ports at the same time (default 20, max 200). Keep this low on hosts you don't own:
+
+```powershell
+python main.py <host> --workers 50
+```
+
 ## Example
 
 ```powershell

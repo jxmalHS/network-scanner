@@ -36,13 +36,13 @@ def _run(monkeypatch: pytest.MonkeyPatch, *args: str) -> None:
 def test_main_uses_common_ports_by_default(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
     """Without --ports, the default COMMON_PORTS list is scanned."""
     _run(monkeypatch, "localhost")
-    checks["scan_ports"].assert_called_once_with("localhost", main_module.COMMON_PORTS)
+    checks["scan_ports"].assert_called_once_with("localhost", main_module.COMMON_PORTS, 20)
 
 
 def test_main_parses_ports_as_ints(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
     """--ports 22 80 is parsed into the integer list [22, 80]."""
     _run(monkeypatch, "localhost", "--ports", "22", "80")
-    checks["scan_ports"].assert_called_once_with("localhost", [22, 80])
+    checks["scan_ports"].assert_called_once_with("localhost", [22, 80], 20)
 
 
 def test_main_rejects_non_integer_port(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
@@ -149,3 +149,68 @@ def test_main_rejects_bad_host_with_exit_code_2(
     assert exc.value.code == 2
     for mock in checks.values():
         mock.assert_not_called()
+
+
+# --- --workers: how many ports are checked at the same time ------------------
+
+
+def test_main_default_workers_is_20(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
+    """Without --workers, scan_ports gets 20 workers (scanner.DEFAULT_WORKERS)."""
+    _run(monkeypatch, "localhost")
+    assert checks["scan_ports"].call_args.args[2] == 20
+
+
+def test_main_passes_workers_option_to_scan_ports(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """--workers 50 is parsed as the int 50 and handed to scan_ports."""
+    _run(monkeypatch, "localhost", "--ports", "80", "--workers", "50")
+    checks["scan_ports"].assert_called_once_with("localhost", [80], 50)
+
+
+@pytest.mark.parametrize("value", ["0", "201", "abc", "-5", "2.5"])
+def test_main_rejects_bad_workers_with_exit_code_2(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], value: str
+) -> None:
+    """Out-of-range or non-whole-number --workers makes argparse exit with code 2, before scanning."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost", f"--workers={value}")
+    assert exc.value.code == 2
+    checks["scan_ports"].assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["1", "200"])
+def test_main_accepts_workers_boundaries(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], value: str
+) -> None:
+    """The smallest (1) and largest (200) allowed values both reach scan_ports."""
+    _run(monkeypatch, "localhost", "--ports", "80", "--workers", value)
+    checks["scan_ports"].assert_called_once_with("localhost", [80], int(value))
+
+
+@pytest.mark.parametrize("value, expected", [("1", 1), ("20", 20), ("200", 200), (" 7 ", 7)])
+def test_worker_count_returns_int_for_valid_values(value: str, expected: int) -> None:
+    """worker_count turns a valid string into an int (int() also tolerates surrounding spaces)."""
+    assert main_module.worker_count(value) == expected
+
+
+@pytest.mark.parametrize("value", ["0", "201", "-5"])
+def test_worker_count_rejects_out_of_range_with_message(value: str) -> None:
+    """Numbers outside 1..200 raise ArgumentTypeError naming the allowed range."""
+    with pytest.raises(argparse.ArgumentTypeError, match="between 1 and 200"):
+        main_module.worker_count(value)
+
+
+@pytest.mark.parametrize("value", ["abc", "2.5", ""])
+def test_worker_count_rejects_non_whole_numbers_with_message(value: str) -> None:
+    """Text, decimals and empty strings raise ArgumentTypeError saying it's not a whole number."""
+    with pytest.raises(argparse.ArgumentTypeError, match="not a whole number"):
+        main_module.worker_count(value)
+
+
+def test_main_prints_port_count_and_workers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """The progress line says how many ports are scanned and how many at a time."""
+    _run(monkeypatch, "localhost", "--ports", "22", "80", "443", "--workers", "5")
+    assert "[*] Scanning 3 ports (5 at a time)...\n" in capsys.readouterr().out

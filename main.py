@@ -1,7 +1,7 @@
 import argparse
 import ipaddress
 import re
-from scanner import scan_ports
+from scanner import DEFAULT_WORKERS, scan_ports
 from headers import check_headers
 from reporter import generate_report
 from redirects import check_open_redirect
@@ -22,19 +22,35 @@ def valid_host(value: str) -> str:
     return value
 
 
+MAX_WORKERS = 200
+
+
+def worker_count(value: str) -> int:
+    """Accept a whole number of worker threads between 1 and MAX_WORKERS."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}")
+    if not 1 <= number <= MAX_WORKERS:
+        raise argparse.ArgumentTypeError(f"must be between 1 and {MAX_WORKERS}, got {number}")
+    return number
+
+
 def main():
     parser = argparse.ArgumentParser(description="Network Vulnerability Scanner")
     parser.add_argument("host", type=valid_host, help="Target host or IP address")
     parser.add_argument("--ports", nargs="+", type=int, default=COMMON_PORTS, help="Ports to scan")
+    parser.add_argument("--workers", type=worker_count, default=DEFAULT_WORKERS,
+                        help=f"Ports to check at the same time (1-{MAX_WORKERS}, default {DEFAULT_WORKERS})")
     args = parser.parse_args()
 
     host = args.host
     ports = args.ports
 
     print(f"\n[*] Starting scan on {host}")
-    
-    print(f"[*] Scanning ports...")
-    open_ports = scan_ports(host, ports)
+
+    print(f"[*] Scanning {len(ports)} ports ({args.workers} at a time)...")
+    open_ports = scan_ports(host, ports, args.workers)
     for entry in open_ports:
         if entry["banner"]:
             print(f"[+] Port {entry['port']} open — {entry['banner'][:50]}")

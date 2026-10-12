@@ -1,4 +1,7 @@
 import socket
+from concurrent.futures import ThreadPoolExecutor
+
+DEFAULT_WORKERS = 20
 
 def scan_port(host, port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -13,10 +16,14 @@ def scan_port(host, port):
                 pass
     return result == 0, banner
 
-def scan_ports(host, ports):
-    open_ports = []
-    for port in ports:
-        is_open, banner = scan_port(host, port)
-        if is_open:
-            open_ports.append({"port": port, "banner": banner})
-    return open_ports
+def scan_ports(host: str, ports: list[int], workers: int = DEFAULT_WORKERS) -> list[dict]:
+    """Scan ports `workers` at a time; results come back in the original port order."""
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        results = list(pool.map(lambda port: scan_port(host, port), ports))
+    finally:
+        # cancel_futures=True: on Ctrl+C or an error, drop the ports still waiting in the
+        # queue instead of scanning them all before stopping.
+        pool.shutdown(wait=True, cancel_futures=True)
+    return [{"port": port, "banner": banner}
+            for port, (is_open, banner) in zip(ports, results) if is_open]
