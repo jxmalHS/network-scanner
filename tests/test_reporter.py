@@ -40,10 +40,8 @@ def _report(
         redirect_results if redirect_results is not None else [],
         ssl_results if ssl_results is not None else VALID_SSL,
     )
-    # reporter.py calls open() with no encoding, so read back with no encoding too.
-    # Both then follow the same default (cp1252 normally, UTF-8 under PYTHONUTF8=1).
-    # encoding="locale" would NOT follow UTF-8 mode and garbles the em dash.
-    return Path(filename).read_text()
+    # reporter.py writes the report as UTF-8, so read it back as UTF-8.
+    return Path(filename).read_text(encoding="utf-8")
 
 
 def test_generate_report_returns_timestamped_filename(in_tmp_dir: Path) -> None:
@@ -258,17 +256,22 @@ def test_generate_report_ssl_domain_mismatch() -> None:
     assert "[CRITICAL] Certificate domain does not match target\n" in text
 
 
-@pytest.mark.xfail(
-    raises=UnicodeDecodeError,
-    reason=(
-        "backlog item 8: report is written in the OS default encoding (cp1252 on Windows), not UTF-8. "
-        "Non-strict because it passes wherever the default already is UTF-8 (Linux/macOS, PYTHONUTF8=1)."
-    ),
-)
 def test_generate_report_is_utf8_encoded() -> None:
     """The report bytes should decode as UTF-8 so the em dash displays correctly."""
     filename = reporter.generate_report("example.com", [{"port": 22, "banner": None}], NO_HEADERS, [], VALID_SSL)
     assert "—" in Path(filename).read_bytes().decode("utf-8")
+
+
+def test_generate_report_non_cp1252_banner_written_as_utf8() -> None:
+    """A banner with characters outside cp1252 (Chinese, check mark) is written without crashing."""
+    text = _report(open_ports=[{"port": 22, "banner": "SSH-2.0 中文 ✓"}])
+    assert "[OPEN] Port 22 — SSH-2.0 中文 ✓" in text.splitlines()
+
+
+def test_generate_report_has_no_utf8_bom() -> None:
+    """The report is plain UTF-8 with no byte-order mark (BOM) at the start."""
+    filename = reporter.generate_report("example.com", [], NO_HEADERS, [], VALID_SSL)
+    assert not Path(filename).read_bytes().startswith(b"\xef\xbb\xbf")
 
 
 @pytest.mark.parametrize(

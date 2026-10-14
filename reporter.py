@@ -13,7 +13,7 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
 
     filename = f"report_{host}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
 
-    with open(filename, "w") as f:
+    with open(filename, "w", encoding="utf-8") as f:
         f.write(f"Network Vulnerability Scan Report\n")
         f.write(f"Target: {host}\n")
         f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
