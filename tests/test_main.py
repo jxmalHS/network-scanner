@@ -1,5 +1,6 @@
 """Tests for main.py - argparse handling and wiring of the checks (every check mocked)."""
 import argparse
+import socket
 from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,7 @@ import main as main_module
 def checks() -> Iterator[dict[str, MagicMock]]:
     """Replace every check and the reporter inside main.py with mocks."""
     with (
+        patch("main.resolve_host", return_value=(socket.AF_INET, "127.0.0.1")) as resolve_host,
         patch("main.scan_ports", return_value=[]) as scan_ports,
         patch("main.check_headers", return_value={"present": [], "missing": []}) as check_headers,
         patch("main.check_open_redirect", return_value=[]) as check_open_redirect,
@@ -19,6 +21,7 @@ def checks() -> Iterator[dict[str, MagicMock]]:
         patch("main.generate_report", return_value="report.txt") as generate_report,
     ):
         yield {
+            "resolve_host": resolve_host,
             "scan_ports": scan_ports,
             "check_headers": check_headers,
             "check_open_redirect": check_open_redirect,
@@ -36,13 +39,13 @@ def _run(monkeypatch: pytest.MonkeyPatch, *args: str) -> None:
 def test_main_uses_common_ports_by_default(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
     """Without --ports, the default COMMON_PORTS list is scanned."""
     _run(monkeypatch, "localhost")
-    checks["scan_ports"].assert_called_once_with("localhost", main_module.COMMON_PORTS, 20)
+    checks["scan_ports"].assert_called_once_with("127.0.0.1", main_module.COMMON_PORTS, 20)
 
 
 def test_main_parses_ports_as_ints(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
     """--ports 22 80 is parsed into the integer list [22, 80]."""
     _run(monkeypatch, "localhost", "--ports", "22", "80")
-    checks["scan_ports"].assert_called_once_with("localhost", [22, 80], 20)
+    checks["scan_ports"].assert_called_once_with("127.0.0.1", [22, 80], 20)
 
 
 def test_main_rejects_non_integer_port(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
@@ -51,6 +54,46 @@ def test_main_rejects_non_integer_port(monkeypatch: pytest.MonkeyPatch, checks: 
         _run(monkeypatch, "localhost", "--ports", "http")
     assert exc.value.code == 2
     checks["scan_ports"].assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "-1", "99999", "abc"])
+def test_main_rejects_bad_port_with_exit_code_2(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], value: str
+) -> None:
+    """Out-of-range or non-numeric ports exit 2 before scanning (--ports=VALUE so '-1' isn't a flag)."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost", f"--ports={value}")
+    assert exc.value.code == 2
+    checks["scan_ports"].assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["1", "65535"])
+def test_main_accepts_port_boundaries(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], value: str
+) -> None:
+    """The lowest (1) and highest (65535) ports both reach scan_ports as ints."""
+    _run(monkeypatch, "localhost", "--ports", value)
+    checks["scan_ports"].assert_called_once_with("127.0.0.1", [int(value)], 20)
+
+
+@pytest.mark.parametrize("value, expected", [("1", 1), ("443", 443), ("65535", 65535)])
+def test_port_number_returns_int_for_valid_values(value: str, expected: int) -> None:
+    """port_number turns a valid string into an int."""
+    assert main_module.port_number(value) == expected
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "-1"])
+def test_port_number_rejects_out_of_range_with_message(value: str) -> None:
+    """Ports outside 1..65535 raise ArgumentTypeError naming the range and the bad value."""
+    with pytest.raises(argparse.ArgumentTypeError, match=f"port must be between 1 and 65535, got {value}"):
+        main_module.port_number(value)
+
+
+@pytest.mark.parametrize("value", ["abc", "8.5", ""])
+def test_port_number_rejects_non_whole_numbers_with_message(value: str) -> None:
+    """Text, decimals and empty strings raise ArgumentTypeError saying it's not a whole number."""
+    with pytest.raises(argparse.ArgumentTypeError, match="not a whole number"):
+        main_module.port_number(value)
 
 
 def test_main_requires_host(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
@@ -64,7 +107,7 @@ def test_main_passes_all_results_to_reporter(monkeypatch: pytest.MonkeyPatch, ch
     """Every check's result is handed to generate_report in order."""
     _run(monkeypatch, "localhost")
     checks["generate_report"].assert_called_once_with(
-        "localhost", [], {"present": [], "missing": []}, [], {"error": "refused"}
+        "localhost", [], {"present": [], "missing": []}, [], {"error": "refused"}, address="127.0.0.1"
     )
 
 
@@ -107,7 +150,7 @@ def test_main_prints_security_headers_progress(
 # --- valid_host: which targets argparse accepts ------------------------------
 
 GOOD_HOSTS = ["localhost", "scanme.nmap.org", "192.168.56.101", "::1"]
-BAD_HOSTS = ["site.com@other.com", "site.com/path", "host:8080", "a b", ""]
+BAD_HOSTS = ["site.com@other.com", "site.com/path", "host:8080", "a b", "", "fe80::1%eth0", "::1%1"]
 
 
 @pytest.mark.parametrize("host", GOOD_HOSTS)
@@ -165,7 +208,7 @@ def test_main_passes_workers_option_to_scan_ports(
 ) -> None:
     """--workers 50 is parsed as the int 50 and handed to scan_ports."""
     _run(monkeypatch, "localhost", "--ports", "80", "--workers", "50")
-    checks["scan_ports"].assert_called_once_with("localhost", [80], 50)
+    checks["scan_ports"].assert_called_once_with("127.0.0.1", [80], 50)
 
 
 @pytest.mark.parametrize("value", ["0", "201", "abc", "-5", "2.5"])
@@ -185,7 +228,7 @@ def test_main_accepts_workers_boundaries(
 ) -> None:
     """The smallest (1) and largest (200) allowed values both reach scan_ports."""
     _run(monkeypatch, "localhost", "--ports", "80", "--workers", value)
-    checks["scan_ports"].assert_called_once_with("localhost", [80], int(value))
+    checks["scan_ports"].assert_called_once_with("127.0.0.1", [80], int(value))
 
 
 @pytest.mark.parametrize("value, expected", [("1", 1), ("20", 20), ("200", 200), (" 7 ", 7)])
@@ -253,6 +296,45 @@ def test_main_normal_run_does_not_print_aborted(
     """A scan that finishes normally returns without SystemExit and never says 'Scan aborted'."""
     _run(monkeypatch, "localhost")  # would fail the test if SystemExit were raised
     assert "Scan aborted" not in capsys.readouterr().out
+
+
+def test_main_unresolvable_host_exits_1_without_other_checks(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """HostResolutionError from resolve_host exits 1 with a clear message; nothing else runs, no report."""
+    checks["resolve_host"].side_effect = main_module.HostResolutionError("no-such-host.invalid (failed)")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "no-such-host.invalid")
+    assert exc.value.code == 1
+    assert "[!] Could not resolve host: no-such-host.invalid (failed)" in capsys.readouterr().out
+    for name in ("scan_ports", "check_headers", "check_open_redirect", "check_ssl", "generate_report"):
+        checks[name].assert_not_called()
+
+
+# --- resolve_host: the target is looked up once, in run_scan ------------------
+
+
+def test_main_resolves_host_exactly_once(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
+    """run_scan looks the name up once, with the host exactly as typed."""
+    _run(monkeypatch, "localhost")
+    checks["resolve_host"].assert_called_once_with("localhost")
+
+
+def test_main_progress_line_shows_host_and_resolved_address(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """For a name, the first progress line shows the name and the IP it resolved to."""
+    _run(monkeypatch, "localhost")
+    assert "[*] Starting scan on localhost (127.0.0.1)\n" in capsys.readouterr().out
+
+
+def test_main_progress_line_shows_ip_literal_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """For an IP target (resolve_host returns it unchanged), the line shows just the IP, not 'IP (IP)'."""
+    checks["resolve_host"].return_value = (socket.AF_INET, "192.168.56.101")
+    _run(monkeypatch, "192.168.56.101")
+    assert "[*] Starting scan on 192.168.56.101\n" in capsys.readouterr().out
 
 
 def test_main_bad_host_still_exits_2_not_130(

@@ -2,7 +2,7 @@ import argparse
 import ipaddress
 import re
 import sys
-from scanner import DEFAULT_WORKERS, scan_ports
+from scanner import DEFAULT_WORKERS, HostResolutionError, resolve_host, scan_ports
 from headers import check_headers
 from reporter import generate_report
 from redirects import check_open_redirect
@@ -13,6 +13,8 @@ COMMON_PORTS = [21,22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 8080, 8443]
 
 def valid_host(value: str) -> str:
     """Accept a plain hostname or IP address; reject anything that could point elsewhere."""
+    if "%" in value:                           # IPv6 zone IDs (fe80::1%eth0) break URLs
+        raise argparse.ArgumentTypeError(f"IPv6 zone IDs (%...) are not supported: {value!r}")
     try:
         ipaddress.ip_address(value)            # IPv4 or IPv6 address
         return value
@@ -24,6 +26,18 @@ def valid_host(value: str) -> str:
 
 
 MAX_WORKERS = 200
+MAX_PORT = 65535
+
+
+def port_number(value: str) -> int:
+    """Accept a whole-number port between 1 and MAX_PORT."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}")
+    if not 1 <= number <= MAX_PORT:
+        raise argparse.ArgumentTypeError(f"port must be between 1 and {MAX_PORT}, got {number}")
+    return number
 
 
 def worker_count(value: str) -> int:
@@ -40,7 +54,7 @@ def worker_count(value: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Network Vulnerability Scanner")
     parser.add_argument("host", type=valid_host, help="Target host or IP address")
-    parser.add_argument("--ports", nargs="+", type=int, default=COMMON_PORTS, help="Ports to scan")
+    parser.add_argument("--ports", nargs="+", type=port_number, default=COMMON_PORTS, help="Ports to scan")
     parser.add_argument("--workers", type=worker_count, default=DEFAULT_WORKERS,
                         help=f"Ports to check at the same time (1-{MAX_WORKERS}, default {DEFAULT_WORKERS})")
     args = parser.parse_args()
@@ -50,6 +64,9 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[!] Scan aborted")   # \n: the terminal echoes ^C on the current line
         sys.exit(130)                  # 128 + 2 (SIGINT): the usual "stopped by Ctrl+C" code
+    except HostResolutionError as e:
+        print(f"\n[!] Could not resolve host: {e}")   # no report: there is nothing to assess
+        sys.exit(1)
 
 
 def run_scan(args: argparse.Namespace) -> None:
@@ -57,10 +74,15 @@ def run_scan(args: argparse.Namespace) -> None:
     host = args.host
     ports = args.ports
 
-    print(f"\n[*] Starting scan on {host}")
+    # Look the name up once (raises HostResolutionError), so the port scan and the report
+    # both use the same address. The other checks keep the name: TLS needs it.
+    _, address = resolve_host(host)
+    target = host if address == host else f"{host} ({address})"
+
+    print(f"\n[*] Starting scan on {target}")
 
     print(f"[*] Scanning {len(ports)} ports ({args.workers} at a time)...")
-    open_ports = scan_ports(host, ports, args.workers)
+    open_ports = scan_ports(address, ports, args.workers)
     for entry in open_ports:
         if entry["banner"]:
             print(f"[+] Port {entry['port']} open — {entry['banner'][:50]}")
@@ -77,7 +99,8 @@ def run_scan(args: argparse.Namespace) -> None:
     ssl_results = check_ssl(host)
     
     print("[*] Generating report...")
-    filename = generate_report(host, open_ports, header_results, redirect_results, ssl_results)
+    filename = generate_report(host, open_ports, header_results, redirect_results, ssl_results,
+                               address=address)
     print(f"[+] Report saved to {filename}\n")
 
 if __name__ == "__main__":

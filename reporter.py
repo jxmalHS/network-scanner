@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 
 # Plain-English reason for each cert_problem word from ssl_checker.
@@ -9,13 +10,17 @@ CERT_PROBLEM_TEXT = {
     "invalid": "failed verification",
 }
 
-def generate_report(host, open_ports, header_results, redirect_results, ssl_results):
+def generate_report(host, open_ports, header_results, redirect_results, ssl_results, address=None):
 
-    filename = f"report_{host}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    # e.g. "::1" -> "__1" (":" is illegal in Windows filenames); [:100] keeps long names under
+    # Windows' 255-character filename limit.
+    safe_host = re.sub(r"[^A-Za-z0-9.-]", "_", host)[:100]
+    filename = f"report_{safe_host}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
 
     with open(filename, "w", encoding="utf-8") as f:
         f.write(f"Network Vulnerability Scan Report\n")
-        f.write(f"Target: {host}\n")
+        target = host if address in (None, host) else f"{host} ({address})"
+        f.write(f"Target: {target}\n")
         f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("=" * 50 + "\n\n")
 

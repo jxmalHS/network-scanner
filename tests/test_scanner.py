@@ -140,7 +140,7 @@ def test_scan_port_closes_socket_on_keyboard_interrupt() -> None:
 def test_scan_ports_returns_only_open_ports_with_banners() -> None:
     """scan_ports keeps open ports (with their banners) and drops closed ones, in order."""
     results = {22: (True, "SSH-2.0-OpenSSH"), 23: (False, None), 80: (True, None)}
-    with patch("scanner.scan_port", side_effect=lambda host, port: results[port]):
+    with patch("scanner.scan_port", side_effect=lambda host, port, family: results[port]):
         assert scanner.scan_ports("127.0.0.1", [22, 23, 80]) == [
             {"port": 22, "banner": "SSH-2.0-OpenSSH"},
             {"port": 80, "banner": None},
@@ -160,17 +160,124 @@ def test_scan_ports_empty_port_list_returns_empty_list() -> None:
     fake.assert_not_called()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=socket.gaierror,
-    reason="backlog item 12: connect_ex is outside the try, so an unresolvable host crashes the scan",
-)
-def test_scan_ports_unresolvable_host_does_not_crash() -> None:
-    """A host name that DNS can't resolve should give 'no open ports', not an exception."""
-    sock = _fake_socket(0)
-    sock.connect_ex.side_effect = socket.gaierror(11001, "getaddrinfo failed")
-    with patch("scanner.socket.socket", return_value=sock):
-        assert scanner.scan_ports("no-such-host.invalid", [80]) == []
+def test_scan_ports_unresolvable_host_raises_host_resolution_error() -> None:
+    """A name DNS can't resolve raises HostResolutionError (main.py turns it into exit 1)."""
+    error = socket.gaierror(11001, "getaddrinfo failed")
+    with patch("scanner.socket.getaddrinfo", side_effect=error):
+        with pytest.raises(scanner.HostResolutionError, match="no-such-host.invalid"):
+            scanner.scan_ports("no-such-host.invalid", [80])
+
+
+# --- resolve_host: turn the target into (address family, IP) -----------------
+
+
+def _addrinfo(family: int, ip: str) -> tuple[Any, ...]:
+    """One getaddrinfo() entry: (family, type, proto, canonname, sockaddr)."""
+    sockaddr = (ip, 0, 0, 0) if family == socket.AF_INET6 else (ip, 0)
+    return (family, socket.SOCK_STREAM, 6, "", sockaddr)
+
+
+def test_resolve_host_ipv4_literal_skips_dns() -> None:
+    """An IPv4 address is returned as AF_INET without any DNS lookup."""
+    with patch("scanner.socket.getaddrinfo") as fake_dns:
+        assert scanner.resolve_host("127.0.0.1") == (socket.AF_INET, "127.0.0.1")
+    fake_dns.assert_not_called()
+
+
+def test_resolve_host_ipv6_literal_skips_dns() -> None:
+    """An IPv6 address is returned as AF_INET6 without any DNS lookup."""
+    with patch("scanner.socket.getaddrinfo") as fake_dns:
+        assert scanner.resolve_host("::1") == (socket.AF_INET6, "::1")
+    fake_dns.assert_not_called()
+
+
+def test_resolve_host_prefers_ipv4_when_ipv6_listed_first() -> None:
+    """Windows lists ::1 before 127.0.0.1 for localhost; the IPv4 entry must still win."""
+    entries = [_addrinfo(socket.AF_INET6, "::1"), _addrinfo(socket.AF_INET, "127.0.0.1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries) as fake_dns:
+        assert scanner.resolve_host("localhost") == (socket.AF_INET, "127.0.0.1")
+    fake_dns.assert_called_once_with("localhost", None, type=socket.SOCK_STREAM)
+
+
+def test_resolve_host_ipv6_only_name_uses_ipv6() -> None:
+    """A name with no IPv4 address falls back to its first (IPv6) entry."""
+    entries = [_addrinfo(socket.AF_INET6, "2001:db8::1"), _addrinfo(socket.AF_INET6, "2001:db8::2")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_host("v6only.example") == (socket.AF_INET6, "2001:db8::1")
+
+
+def test_resolve_host_gaierror_becomes_host_resolution_error() -> None:
+    """A DNS failure (gaierror) is re-raised as HostResolutionError naming the host."""
+    error = socket.gaierror(11001, "getaddrinfo failed")
+    with patch("scanner.socket.getaddrinfo", side_effect=error):
+        with pytest.raises(scanner.HostResolutionError, match="no-such-host.invalid"):
+            scanner.resolve_host("no-such-host.invalid")
+
+
+def test_resolve_host_unicode_error_becomes_host_resolution_error() -> None:
+    """An over-long label (UnicodeError from the idna codec) also becomes HostResolutionError."""
+    host = "a" * 64 + ".com"
+    with patch("scanner.socket.getaddrinfo", side_effect=UnicodeError("label too long")):
+        with pytest.raises(scanner.HostResolutionError, match=host):
+            scanner.resolve_host(host)
+
+
+# --- scan_port address family -------------------------------------------------
+
+
+def test_scan_port_creates_socket_with_given_family() -> None:
+    """scan_port(..., family=AF_INET6) opens an IPv6 TCP socket."""
+    sock = _fake_socket(10061)
+    with patch("scanner.socket.socket", return_value=sock) as fake_socket_class:
+        scanner.scan_port("::1", 80, socket.AF_INET6)
+    fake_socket_class.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
+
+
+def test_scan_port_defaults_to_ipv4_family() -> None:
+    """Without a family argument, scan_port opens an IPv4 (AF_INET) TCP socket."""
+    sock = _fake_socket(10061)
+    with patch("scanner.socket.socket", return_value=sock) as fake_socket_class:
+        scanner.scan_port("127.0.0.1", 80)
+    fake_socket_class.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM)
+
+
+# --- scan_ports resolves the host once ----------------------------------------
+
+
+def test_scan_ports_resolves_host_exactly_once() -> None:
+    """Many ports and workers still mean one DNS lookup, done before the pool starts."""
+    entries = [_addrinfo(socket.AF_INET, "192.0.2.1")]
+    with (
+        patch("scanner.socket.getaddrinfo", return_value=entries) as fake_dns,
+        patch("scanner.scan_port", return_value=(False, None)),
+    ):
+        scanner.scan_ports("scanme.example", list(range(1, 51)), workers=10)
+    fake_dns.assert_called_once()
+
+
+def test_scan_ports_workers_receive_ip_and_family_not_name() -> None:
+    """Each scan_port call gets the resolved IP and its family, never the host name."""
+    entries = [_addrinfo(socket.AF_INET6, "2001:db8::1")]
+    with (
+        patch("scanner.socket.getaddrinfo", return_value=entries),
+        patch("scanner.scan_port", return_value=(False, None)) as fake_scan,
+    ):
+        scanner.scan_ports("scanme.example", [22, 80], workers=2)
+    assert sorted(c.args for c in fake_scan.call_args_list) == [
+        ("2001:db8::1", 22, socket.AF_INET6),
+        ("2001:db8::1", 80, socket.AF_INET6),
+    ]
+
+
+def test_scan_ports_unresolvable_host_never_calls_scan_port() -> None:
+    """If resolution fails, HostResolutionError is raised before any port is scanned."""
+    with (
+        patch("scanner.socket.getaddrinfo", side_effect=socket.gaierror(11001, "failed")),
+        patch("scanner.scan_port") as fake_scan,
+    ):
+        with pytest.raises(scanner.HostResolutionError):
+            scanner.scan_ports("no-such-host.invalid", [22, 80, 443], workers=3)
+    fake_scan.assert_not_called()
 
 
 # --- scan_ports concurrency (backlog #7) --------------------------------------
@@ -206,7 +313,7 @@ def test_scan_ports_keeps_port_order_when_later_ports_finish_first() -> None:
     finished: list[int] = []
     delays = {1: 0.06, 2: 0.03, 3: 0.0}  # port 1 is the slowest, port 3 the fastest
 
-    def slow_for_low_ports(host: str, port: int) -> tuple[bool, str]:
+    def slow_for_low_ports(host: str, port: int, family: int) -> tuple[bool, str]:
         time.sleep(delays[port])
         finished.append(port)
         return True, f"banner-{port}"
@@ -242,7 +349,7 @@ def test_scan_ports_runs_scans_at_the_same_time() -> None:
     """With 2 workers, two scans are in progress at once (both reach the barrier together)."""
     barrier = threading.Barrier(2, timeout=2)  # timeout guards against hanging forever
 
-    def wait_for_partner(host: str, port: int) -> tuple[bool, None]:
+    def wait_for_partner(host: str, port: int, family: int) -> tuple[bool, None]:
         barrier.wait()  # only returns once BOTH scans are waiting here
         return True, None
 
@@ -255,7 +362,7 @@ def test_scan_ports_one_worker_scans_one_port_at_a_time() -> None:
     """With 1 worker the second scan never starts while the first waits, so the barrier breaks."""
     barrier = threading.Barrier(2, timeout=0.2)  # short timeout: this test expects it to expire
 
-    def wait_for_partner(host: str, port: int) -> tuple[bool, None]:
+    def wait_for_partner(host: str, port: int, family: int) -> tuple[bool, None]:
         barrier.wait()
         return True, None
 
@@ -265,18 +372,17 @@ def test_scan_ports_one_worker_scans_one_port_at_a_time() -> None:
 
 
 def test_scan_ports_propagates_exception_from_scan_port() -> None:
-    """An error inside a worker thread (e.g. DNS failure) is re-raised to the caller."""
-    error = socket.gaierror(11001, "getaddrinfo failed")
-    with patch("scanner.scan_port", side_effect=error):
-        with pytest.raises(socket.gaierror):
-            scanner.scan_ports("no-such-host.invalid", [80, 443], workers=2)
+    """An error inside a worker thread is re-raised to the caller."""
+    with patch("scanner.scan_port", side_effect=OSError("network unreachable")):
+        with pytest.raises(OSError, match="network unreachable"):
+            scanner.scan_ports("127.0.0.1", [80, 443], workers=2)
 
 
 def test_scan_ports_keyboard_interrupt_stops_remaining_scans() -> None:
     """Ctrl+C on the first port escapes scan_ports and the queued ports are dropped, not scanned."""
     calls: list[int] = []
 
-    def interrupt_first(host: str, port: int) -> tuple[bool, None]:
+    def interrupt_first(host: str, port: int, family: int) -> tuple[bool, None]:
         calls.append(port)
         if port == 1:
             raise KeyboardInterrupt

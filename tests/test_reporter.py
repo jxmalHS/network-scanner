@@ -51,10 +51,48 @@ def test_generate_report_returns_timestamped_filename(in_tmp_dir: Path) -> None:
     assert (in_tmp_dir / filename).is_file()
 
 
+def test_generate_report_ipv6_host_gets_safe_filename(in_tmp_dir: Path) -> None:
+    """':' is illegal in Windows filenames, so '::1' becomes '__1' in the name; Target keeps '::1'."""
+    filename = reporter.generate_report("::1", [], NO_HEADERS, [], VALID_SSL)
+    assert re.fullmatch(r"report___1_\d{8}_\d{6}\.txt", filename)
+    assert (in_tmp_dir / filename).is_file()
+    assert "Target: ::1\n" in (in_tmp_dir / filename).read_text(encoding="utf-8")
+
+
 def test_generate_report_includes_target_header() -> None:
     """The report starts with its title and the target host."""
     text = _report()
     assert text.startswith("Network Vulnerability Scan Report\nTarget: example.com\n")
+
+
+def _target_line(in_tmp_dir: Path, host: str, **kwargs: Any) -> str:
+    """Write a report for host (extra kwargs passed through) and return its 'Target:' line."""
+    filename = reporter.generate_report(host, [], NO_HEADERS, [], VALID_SSL, **kwargs)
+    return (in_tmp_dir / filename).read_text(encoding="utf-8").splitlines()[1]
+
+
+def test_generate_report_target_shows_resolved_address(in_tmp_dir: Path) -> None:
+    """When the resolved address differs from the host, both are shown."""
+    assert _target_line(in_tmp_dir, "localhost", address="127.0.0.1") == "Target: localhost (127.0.0.1)"
+
+
+def test_generate_report_target_not_duplicated_for_ip_host(in_tmp_dir: Path) -> None:
+    """An IP target whose address is itself is shown once, not 'IP (IP)'."""
+    assert _target_line(in_tmp_dir, "127.0.0.1", address="127.0.0.1") == "Target: 127.0.0.1"
+
+
+def test_generate_report_target_without_address_is_just_host(in_tmp_dir: Path) -> None:
+    """Omitting address keeps the old 'Target: <host>' line."""
+    assert _target_line(in_tmp_dir, "localhost") == "Target: localhost"
+
+
+def test_generate_report_long_host_truncated_to_100_chars_in_filename(in_tmp_dir: Path) -> None:
+    """A 253-char host (the DNS maximum) is cut to 100 chars in the filename, and the file is created."""
+    filename = reporter.generate_report("a" * 253, [], NO_HEADERS, [], VALID_SSL)
+    match = re.fullmatch(r"report_(.+)_\d{8}_\d{6}\.txt", filename)
+    assert match is not None
+    assert match.group(1) == "a" * 100
+    assert (in_tmp_dir / filename).is_file()
 
 
 def test_generate_report_lists_open_port_with_banner() -> None:
