@@ -63,6 +63,11 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
         f.write("\nOPEN REDIRECT CHECK\n")
         f.write("-" * 20 + "\n")
         r = redirect_results
+        http_url = r["base_url"].replace("https://", "http://", 1)
+        if r.get("switch_reason") == "redirect":
+            f.write(f"[INFO] {http_url} redirects to HTTPS; probes were sent to {r['base_url']} instead\n")
+        elif r.get("switch_reason") == "no_http":
+            f.write(f"[INFO] {http_url} could not be reached; probes were sent to {r['base_url']} instead\n")
         for url in r["vulnerable"]:
             f.write(f"[VULNERABLE] {url}\n")
         if not r["complete"]:

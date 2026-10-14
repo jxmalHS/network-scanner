@@ -27,16 +27,21 @@ def in_tmp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _redirects(
-    vulnerable: list[str] | None = None, sent: int = 32, skipped: int = 0, complete: bool = True
+    vulnerable: list[str] | None = None, sent: int = 32, skipped: int = 0, complete: bool = True,
+    switch_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Build a redirect result shaped like redirects.RedirectResults (default: clean, complete run)."""
+    """Build a redirect result shaped like redirects.RedirectResults (default: clean, complete run).
+
+    A switch_reason means the probes went to https://, so base_url becomes https://example.com.
+    """
     return {
-        "base_url": "http://example.com",
+        "base_url": "https://example.com" if switch_reason else "http://example.com",
         "vulnerable": vulnerable if vulnerable is not None else [],
         "probes_total": 32,
         "probes_sent": sent,
         "probes_skipped": skipped,
         "complete": complete,
+        "switch_reason": switch_reason,
     }
 
 
@@ -313,6 +318,50 @@ def test_generate_report_skipped_redirect_probes_info_line() -> None:
     assert "No open redirects found in the 29 probes that got an answer.\n" in text
     assert "No open redirects found.\n" not in text
     assert "[WARNING] Check incomplete" not in text
+
+
+REDIRECT_INFO = ("[INFO] http://example.com redirects to HTTPS; "
+                 "probes were sent to https://example.com instead\n")
+NO_HTTP_INFO = ("[INFO] http://example.com could not be reached; "
+                "probes were sent to https://example.com instead\n")
+
+
+def test_generate_report_https_switch_by_redirect_info_line() -> None:
+    """switch_reason 'redirect' explains that HTTP redirected and probes went to HTTPS."""
+    section = _redirect_section(_report(redirect_results=_redirects(switch_reason="redirect")))
+    assert REDIRECT_INFO in section
+    assert NO_HTTP_INFO not in section
+
+
+def test_generate_report_https_switch_no_http_info_line() -> None:
+    """switch_reason 'no_http' explains that HTTP was unreachable and probes went to HTTPS."""
+    section = _redirect_section(_report(redirect_results=_redirects(switch_reason="no_http")))
+    assert NO_HTTP_INFO in section
+    assert REDIRECT_INFO not in section
+
+
+def test_generate_report_no_switch_info_without_switch_reason() -> None:
+    """switch_reason None: neither switch line is written."""
+    section = _redirect_section(_report(redirect_results=_redirects()))
+    assert "redirects to HTTPS" not in section
+    assert "could not be reached" not in section
+
+
+def test_generate_report_no_http_and_https_unreachable_shows_both_lines() -> None:
+    """HTTP unreachable, then HTTPS also failed at probe 1: INFO line plus could-not-connect warning."""
+    section = _redirect_section(_report(redirect_results=_redirects(
+        sent=1, complete=False, switch_reason="no_http")))
+    assert NO_HTTP_INFO in section
+    assert ("[WARNING] Check incomplete: could not connect to https://example.com; "
+            "no probes were answered\n") in section
+    assert "No open redirects found" not in section
+
+
+def test_generate_report_switched_clean_run_still_says_no_redirects() -> None:
+    """A switched, complete, clean run still ends with 'No open redirects found.'."""
+    section = _redirect_section(_report(redirect_results=_redirects(switch_reason="redirect")))
+    assert section.endswith("No open redirects found.\n\n")
+    assert section.index(REDIRECT_INFO) < section.index("No open redirects found.")
 
 
 def test_generate_report_ssl_refused_by_winerror_code() -> None:

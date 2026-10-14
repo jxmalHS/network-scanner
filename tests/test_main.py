@@ -11,7 +11,7 @@ import main as main_module
 # A clean, complete result shaped like redirects.RedirectResults.
 REDIRECT_RESULTS = {
     "base_url": "http://localhost", "vulnerable": [], "probes_total": 32,
-    "probes_sent": 32, "probes_skipped": 0, "complete": True,
+    "probes_sent": 32, "probes_skipped": 0, "complete": True, "switch_reason": None,
 }
 
 
