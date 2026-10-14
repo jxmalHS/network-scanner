@@ -1,6 +1,7 @@
 import argparse
 import ipaddress
 import re
+import sys
 from scanner import DEFAULT_WORKERS, scan_ports
 from headers import check_headers
 from reporter import generate_report
@@ -36,7 +37,7 @@ def worker_count(value: str) -> int:
     return number
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Network Vulnerability Scanner")
     parser.add_argument("host", type=valid_host, help="Target host or IP address")
     parser.add_argument("--ports", nargs="+", type=int, default=COMMON_PORTS, help="Ports to scan")
@@ -44,6 +45,15 @@ def main():
                         help=f"Ports to check at the same time (1-{MAX_WORKERS}, default {DEFAULT_WORKERS})")
     args = parser.parse_args()
 
+    try:
+        run_scan(args)
+    except KeyboardInterrupt:
+        print("\n[!] Scan aborted")   # \n: the terminal echoes ^C on the current line
+        sys.exit(130)                  # 128 + 2 (SIGINT): the usual "stopped by Ctrl+C" code
+
+
+def run_scan(args: argparse.Namespace) -> None:
+    """Run every check in order and write the report."""
     host = args.host
     ports = args.ports
 

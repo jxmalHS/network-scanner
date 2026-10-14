@@ -214,3 +214,52 @@ def test_main_prints_port_count_and_workers(
     """The progress line says how many ports are scanned and how many at a time."""
     _run(monkeypatch, "localhost", "--ports", "22", "80", "443", "--workers", "5")
     assert "[*] Scanning 3 ports (5 at a time)...\n" in capsys.readouterr().out
+
+
+# --- Ctrl+C: KeyboardInterrupt becomes a clean exit with code 130 -------------
+
+
+def test_main_ctrl_c_during_port_scan_exits_130_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Ctrl+C in scan_ports exits 130 with '[!] Scan aborted', skips later checks, no traceback."""
+    checks["scan_ports"].side_effect = KeyboardInterrupt
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 130
+    captured = capsys.readouterr()
+    assert "[!] Scan aborted" in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    for name in ("check_headers", "check_open_redirect", "check_ssl", "generate_report"):
+        checks[name].assert_not_called()
+
+
+def test_main_ctrl_c_during_ssl_check_exits_130_without_report(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Ctrl+C late in the scan (check_ssl) is caught too, and no report is written."""
+    checks["check_ssl"].side_effect = KeyboardInterrupt
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 130
+    assert "[!] Scan aborted" in capsys.readouterr().out
+    checks["generate_report"].assert_not_called()
+
+
+def test_main_normal_run_does_not_print_aborted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A scan that finishes normally returns without SystemExit and never says 'Scan aborted'."""
+    _run(monkeypatch, "localhost")  # would fail the test if SystemExit were raised
+    assert "Scan aborted" not in capsys.readouterr().out
+
+
+def test_main_bad_host_still_exits_2_not_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """argparse errors happen outside the try, so they keep exit code 2 and no abort message."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "site.com/path")
+    assert exc.value.code == 2
+    assert "Scan aborted" not in capsys.readouterr().out
