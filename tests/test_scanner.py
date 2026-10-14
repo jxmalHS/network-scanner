@@ -30,10 +30,28 @@ def _fake_socket(connect_result: int, recv: bytes | BaseException = b"") -> Magi
 
 
 def test_scan_port_open_returns_true_and_banner() -> None:
-    """An open port (connect_ex == 0) reports True plus the stripped, decoded banner."""
+    """An open port (connect_ex == 0) reports True plus the decoded banner, cleaned to one line."""
     sock = _fake_socket(0, b"HTTP/1.0 200 OK\r\nServer: nginx\r\n\r\n")
     with patch("scanner.socket.socket", return_value=sock):
-        assert scanner.scan_port("127.0.0.1", 80) == (True, "HTTP/1.0 200 OK\r\nServer: nginx")
+        assert scanner.scan_port("127.0.0.1", 80) == (True, "HTTP/1.0 200 OK | Server: nginx")
+
+
+def test_scan_port_hostile_banner_is_single_line_without_escape() -> None:
+    """A banner trying to fake a report line and recolour the terminal is flattened and defanged."""
+    sock = _fake_socket(0, b"OK\r\n[OPEN] Port 9999 \x1b[31mX")
+    with patch("scanner.socket.socket", return_value=sock):
+        _, banner = scanner.scan_port("127.0.0.1", 80)
+    assert banner is not None
+    assert "\n" not in banner and "\r" not in banner
+    assert "\x1b" not in banner
+    assert " | " in banner
+
+
+def test_scan_port_banner_of_only_control_bytes_is_empty() -> None:
+    """A banner made only of control bytes cleans to '' (main.py then shows 'no banner')."""
+    sock = _fake_socket(0, b"\x1b\x00")
+    with patch("scanner.socket.socket", return_value=sock):
+        assert scanner.scan_port("127.0.0.1", 80) == (True, "")
 
 
 def test_scan_port_sends_http_head_probe_to_open_port() -> None:

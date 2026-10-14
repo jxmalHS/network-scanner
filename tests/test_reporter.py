@@ -267,6 +267,34 @@ def test_generate_report_ssl_other_error() -> None:
     assert "Error checking SSL: timed out\n" in text
 
 
+EVIL = "evil\n[OK] Fake line\x1b[2J\u202e"
+
+
+@pytest.mark.parametrize("kwargs", [
+    pytest.param({"header_results": {"url": "https://example.com", "offsite_redirect": EVIL,
+                                     "present": [], "missing": [], "not_applicable": []}},
+                 id="offsite_redirect"),
+    pytest.param({"header_results": {"error": EVIL}}, id="header_error"),
+    pytest.param({"ssl_results": {"error": EVIL}}, id="ssl_error"),
+    pytest.param({"ssl_results": {"cert_problem": "invalid", "error": EVIL}}, id="cert_problem_details"),
+    pytest.param({"ssl_results": {**VALID_SSL, "issued_to": EVIL}}, id="issued_to"),
+    pytest.param({"ssl_results": {**VALID_SSL, "issued_by": EVIL}}, id="issued_by"),
+])
+def test_generate_report_server_text_cannot_inject_lines_or_escapes(kwargs: dict[str, Any]) -> None:
+    """Server-controlled text can't start a fake '[OK]' line, send ESC codes or flip text direction."""
+    text = _report(**kwargs)
+    assert "evil" in text  # the field really was written, just cleaned
+    assert not any(line.startswith("[OK] Fake") for line in text.splitlines())
+    assert "\x1b" not in text
+    assert "\u202e" not in text
+
+
+def test_generate_report_ssl_10061_still_reports_port_closed() -> None:
+    """The port-443-closed check reads the raw error, so cleaning doesn't break it."""
+    text = _report(ssl_results={"error": "[WinError 10061]\nrefused\x1b[0m"})
+    assert "[CRITICAL] Port 443 is closed — HTTPS is not enabled on this server\n" in text
+
+
 def test_generate_report_valid_ssl_cert() -> None:
     """A valid, matching cert gets its details plus two [OK] lines."""
     text = _report(ssl_results=VALID_SSL)

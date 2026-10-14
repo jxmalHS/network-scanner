@@ -139,6 +139,15 @@ def test_main_prints_progress_and_results(
     assert "[+] Report saved to report.txt" in out
 
 
+def test_main_prints_cleaned_banner_on_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A banner already cleaned by scanner ('A | B') is printed as a single console line."""
+    checks["scan_ports"].return_value = [{"port": 80, "banner": "A | B"}]
+    _run(monkeypatch, "localhost")
+    assert "[+] Port 80 open — A | B\n" in capsys.readouterr().out
+
+
 def test_main_prints_security_headers_progress(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
 ) -> None:

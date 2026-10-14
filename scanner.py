@@ -2,6 +2,8 @@ import ipaddress
 import socket
 from concurrent.futures import ThreadPoolExecutor
 
+from textsafe import clean_text
+
 DEFAULT_WORKERS = 20
 
 
@@ -35,7 +37,9 @@ def scan_port(host, port, family=socket.AF_INET):
         if result == 0:
             try:
                 sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
-                banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
+                # clean_text: the banner comes from a possibly hostile server; make it one
+                # printable line so it can't fake report lines or send terminal escape codes.
+                banner = clean_text(sock.recv(1024).decode("utf-8", errors="ignore"))
             except OSError:
                 pass
     return result == 0, banner

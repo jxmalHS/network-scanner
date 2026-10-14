@@ -1,6 +1,8 @@
 import re
 from datetime import datetime
 
+from textsafe import clean_text
+
 # Plain-English reason for each cert_problem word from ssl_checker.
 CERT_PROBLEM_TEXT = {
     "hostname_mismatch": "name does not match the host",
@@ -38,19 +40,19 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
         f.write("\nHTTP SECURITY HEADERS\n")
         f.write("-" * 20 + "\n")
         if "error" in header_results:
-            f.write(f"Error fetching headers: {header_results['error']}\n")
+            f.write(f"Error fetching headers: {clean_text(header_results['error'])}\n")
         else:
             if "url" in header_results:
-                f.write(f"Checked: {header_results['url']}\n")
+                f.write(f"Checked: {clean_text(header_results['url'])}\n")
             if "https_error" in header_results:
                 kind = "TLS problem" if header_results.get("https_tls_problem") else "could not connect"
                 f.write(f"[WARNING] HTTPS attempt failed ({kind}) — fell back to http://\n")
-                f.write(f"Details: {header_results['https_error']}\n")
+                f.write(f"Details: {clean_text(header_results['https_error'])}\n")
             if "downgraded_from" in header_results:
                 f.write(f"[WARNING] HTTPS redirected to plain HTTP "
-                        f"({header_results['downgraded_from']} -> {header_results['url']})\n")
+                        f"({clean_text(header_results['downgraded_from'])} -> {clean_text(header_results['url'])})\n")
             if "offsite_redirect" in header_results:
-                f.write(f"[INFO] Redirect to another host not followed: {header_results['offsite_redirect']}\n")
+                f.write(f"[INFO] Redirect to another host not followed: {clean_text(header_results['offsite_redirect'])}\n")
             for header in header_results["present"]:
                 f.write(f"[PRESENT] {header}\n")
             for header in header_results["missing"]:
@@ -71,15 +73,15 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
         if "cert_problem" in ssl_results:
             reason = CERT_PROBLEM_TEXT.get(ssl_results['cert_problem'], CERT_PROBLEM_TEXT["invalid"])
             f.write(f"[CRITICAL] Certificate rejected: {reason}\n")
-            f.write(f"Details: {ssl_results.get('error', 'no details')}\n")
+            f.write(f"Details: {clean_text(ssl_results.get('error', 'no details'))}\n")
         elif "error" in ssl_results:
             if "10061" in str(ssl_results['error']) or "refused" in str(ssl_results['error']).lower():
                 f.write("[CRITICAL] Port 443 is closed — HTTPS is not enabled on this server\n")
             else:
-                f.write(f"Error checking SSL: {ssl_results['error']}\n")
+                f.write(f"Error checking SSL: {clean_text(ssl_results['error'])}\n")
         else:
-            f.write(f"Issued to: {ssl_results['issued_to']}\n")
-            f.write(f"Issued by: {ssl_results['issued_by']}\n")
+            f.write(f"Issued to: {clean_text(ssl_results['issued_to'])}\n")
+            f.write(f"Issued by: {clean_text(ssl_results['issued_by'])}\n")
             f.write(f"Expires: {ssl_results['expire_date']} ({ssl_results['days_remaining']} days remaining)\n")
             if ssl_results['expired']:
                 f.write("[CRITICAL] Certificate has expired\n")
