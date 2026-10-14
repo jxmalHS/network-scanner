@@ -8,6 +8,12 @@ import pytest
 
 import main as main_module
 
+# A clean, complete result shaped like redirects.RedirectResults.
+REDIRECT_RESULTS = {
+    "base_url": "http://localhost", "vulnerable": [], "probes_total": 32,
+    "probes_sent": 32, "probes_skipped": 0, "complete": True,
+}
+
 
 @pytest.fixture
 def checks() -> Iterator[dict[str, MagicMock]]:
@@ -16,7 +22,7 @@ def checks() -> Iterator[dict[str, MagicMock]]:
         patch("main.resolve_host", return_value=(socket.AF_INET, "127.0.0.1")) as resolve_host,
         patch("main.scan_ports", return_value=[]) as scan_ports,
         patch("main.check_headers", return_value={"present": [], "missing": []}) as check_headers,
-        patch("main.check_open_redirect", return_value=[]) as check_open_redirect,
+        patch("main.check_open_redirect", return_value=dict(REDIRECT_RESULTS)) as check_open_redirect,
         patch("main.check_ssl", return_value={"error": "refused"}) as check_ssl,
         patch("main.generate_report", return_value="report.txt") as generate_report,
     ):
@@ -107,8 +113,18 @@ def test_main_passes_all_results_to_reporter(monkeypatch: pytest.MonkeyPatch, ch
     """Every check's result is handed to generate_report in order."""
     _run(monkeypatch, "localhost")
     checks["generate_report"].assert_called_once_with(
-        "localhost", [], {"present": [], "missing": []}, [], {"error": "refused"}, address="127.0.0.1"
+        "localhost", [], {"present": [], "missing": []}, REDIRECT_RESULTS, {"error": "refused"},
+        address="127.0.0.1",
     )
+
+
+def test_main_passes_redirect_results_dict_unchanged(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """The exact dict from check_open_redirect reaches generate_report (same object, not rebuilt)."""
+    _run(monkeypatch, "localhost")
+    redirect_arg = checks["generate_report"].call_args.args[3]
+    assert redirect_arg is checks["check_open_redirect"].return_value
 
 
 def test_main_runs_redirect_and_ssl_checks_on_host(

@@ -62,11 +62,29 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
 
         f.write("\nOPEN REDIRECT CHECK\n")
         f.write("-" * 20 + "\n")
-        if redirect_results:
-            for url in redirect_results:
-                f.write(f"[VULNERABLE] {url}\n")
-        else:
-            f.write("No open redirects found.\n")
+        r = redirect_results
+        for url in r["vulnerable"]:
+            f.write(f"[VULNERABLE] {url}\n")
+        if not r["complete"]:
+            if r["probes_sent"] == 1:
+                f.write(f"[WARNING] Check incomplete: could not connect to {r['base_url']}; "
+                        f"no probes were answered\n")
+            else:
+                f.write(f"[WARNING] Check incomplete: host stopped answering at probe "
+                        f"{r['probes_sent']} of {r['probes_total']}; the rest were not sent\n")
+        if r["probes_skipped"]:
+            f.write(f"[INFO] {r['probes_skipped']} of {r['probes_total']} probes got no usable "
+                    f"answer (timeout or unreadable reply) and were skipped\n")
+        if not r["vulnerable"]:
+            # Only claim a clean result for probes that actually got an answer.
+            answered = r["probes_sent"] - r["probes_skipped"] - (0 if r["complete"] else 1)
+            if answered == 0:
+                f.write("[WARNING] No probe got a usable answer; the redirect check could not run.\n")
+            elif r["complete"] and not r["probes_skipped"]:
+                f.write("No open redirects found.\n")
+            else:
+                probes = "probe" if answered == 1 else "probes"
+                f.write(f"No open redirects found in the {answered} {probes} that got an answer.\n")
 
         f.write("\nSSL/TLS CERTIFICATE\n")
         f.write("-" * 20 + "\n")

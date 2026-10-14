@@ -26,10 +26,30 @@ def in_tmp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+def _redirects(
+    vulnerable: list[str] | None = None, sent: int = 32, skipped: int = 0, complete: bool = True
+) -> dict[str, Any]:
+    """Build a redirect result shaped like redirects.RedirectResults (default: clean, complete run)."""
+    return {
+        "base_url": "http://example.com",
+        "vulnerable": vulnerable if vulnerable is not None else [],
+        "probes_total": 32,
+        "probes_sent": sent,
+        "probes_skipped": skipped,
+        "complete": complete,
+    }
+
+
+def _redirect_section(text: str) -> str:
+    """Just the OPEN REDIRECT CHECK section of a report (up to the SSL heading)."""
+    start = text.index("OPEN REDIRECT CHECK\n")
+    return text[start:text.index("SSL/TLS CERTIFICATE\n", start)]
+
+
 def _report(
     open_ports: list[dict[str, Any]] | None = None,
     header_results: dict[str, Any] | None = None,
-    redirect_results: list[str] | None = None,
+    redirect_results: dict[str, Any] | None = None,
     ssl_results: dict[str, Any] | None = None,
 ) -> str:
     """Generate a report with sensible defaults and return its text."""
@@ -37,7 +57,7 @@ def _report(
         "example.com",
         open_ports if open_ports is not None else [],
         header_results if header_results is not None else NO_HEADERS,
-        redirect_results if redirect_results is not None else [],
+        redirect_results if redirect_results is not None else _redirects(),
         ssl_results if ssl_results is not None else VALID_SSL,
     )
     # reporter.py writes the report as UTF-8, so read it back as UTF-8.
@@ -46,14 +66,14 @@ def _report(
 
 def test_generate_report_returns_timestamped_filename(in_tmp_dir: Path) -> None:
     """The returned filename is report_<host>_<YYYYMMDD_HHMMSS>.txt and the file exists."""
-    filename = reporter.generate_report("example.com", [], NO_HEADERS, [], VALID_SSL)
+    filename = reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)
     assert re.fullmatch(r"report_example\.com_\d{8}_\d{6}\.txt", filename)
     assert (in_tmp_dir / filename).is_file()
 
 
 def test_generate_report_ipv6_host_gets_safe_filename(in_tmp_dir: Path) -> None:
     """':' is illegal in Windows filenames, so '::1' becomes '__1' in the name; Target keeps '::1'."""
-    filename = reporter.generate_report("::1", [], NO_HEADERS, [], VALID_SSL)
+    filename = reporter.generate_report("::1", [], NO_HEADERS, _redirects(), VALID_SSL)
     assert re.fullmatch(r"report___1_\d{8}_\d{6}\.txt", filename)
     assert (in_tmp_dir / filename).is_file()
     assert "Target: ::1\n" in (in_tmp_dir / filename).read_text(encoding="utf-8")
@@ -67,7 +87,7 @@ def test_generate_report_includes_target_header() -> None:
 
 def _target_line(in_tmp_dir: Path, host: str, **kwargs: Any) -> str:
     """Write a report for host (extra kwargs passed through) and return its 'Target:' line."""
-    filename = reporter.generate_report(host, [], NO_HEADERS, [], VALID_SSL, **kwargs)
+    filename = reporter.generate_report(host, [], NO_HEADERS, _redirects(), VALID_SSL, **kwargs)
     return (in_tmp_dir / filename).read_text(encoding="utf-8").splitlines()[1]
 
 
@@ -88,7 +108,7 @@ def test_generate_report_target_without_address_is_just_host(in_tmp_dir: Path) -
 
 def test_generate_report_long_host_truncated_to_100_chars_in_filename(in_tmp_dir: Path) -> None:
     """A 253-char host (the DNS maximum) is cut to 100 chars in the filename, and the file is created."""
-    filename = reporter.generate_report("a" * 253, [], NO_HEADERS, [], VALID_SSL)
+    filename = reporter.generate_report("a" * 253, [], NO_HEADERS, _redirects(), VALID_SSL)
     match = re.fullmatch(r"report_(.+)_\d{8}_\d{6}\.txt", filename)
     assert match is not None
     assert match.group(1) == "a" * 100
@@ -241,12 +261,58 @@ def test_generate_report_old_style_header_result_still_works() -> None:
 def test_generate_report_lists_vulnerable_redirects() -> None:
     """Each vulnerable redirect URL is written with [VULNERABLE]."""
     url = "http://example.com?next=http://evil.com"
-    assert f"[VULNERABLE] {url}\n" in _report(redirect_results=[url])
+    assert f"[VULNERABLE] {url}\n" in _report(redirect_results=_redirects([url]))
 
 
 def test_generate_report_no_redirects() -> None:
-    """An empty redirect list is written as 'No open redirects found.'."""
-    assert "No open redirects found.\n" in _report(redirect_results=[])
+    """A complete, clean run is written as exactly 'No open redirects found.', with no warnings."""
+    section = _redirect_section(_report(redirect_results=_redirects()))
+    assert section == "OPEN REDIRECT CHECK\n" + "-" * 20 + "\nNo open redirects found.\n\n"
+    assert "[WARNING]" not in section
+    assert "[INFO]" not in section
+
+
+def test_generate_report_incomplete_redirect_check_does_not_claim_clean() -> None:
+    """Could not connect at probe 1: say so, and never print any 'No open redirects found' line."""
+    text = _report(redirect_results=_redirects(sent=1, complete=False))
+    assert ("[WARNING] Check incomplete: could not connect to http://example.com; "
+            "no probes were answered\n") in text
+    assert "[WARNING] No probe got a usable answer; the redirect check could not run.\n" in text
+    assert "No open redirects found" not in text
+
+
+def test_generate_report_incomplete_after_some_answers_counts_them() -> None:
+    """Host went quiet at probe 5: 4 probes were answered, and the wording says exactly that."""
+    text = _report(redirect_results=_redirects(sent=5, complete=False))
+    assert "host stopped answering at probe 5 of 32; the rest were not sent\n" in text
+    assert "No open redirects found in the 4 probes that got an answer.\n" in text
+    assert "No open redirects found.\n" not in text
+
+
+def test_generate_report_all_probes_skipped_says_check_could_not_run() -> None:
+    """Every probe skipped (e.g. all timed out): no 'no redirects found' claim at all."""
+    text = _report(redirect_results=_redirects(skipped=32))
+    assert "[WARNING] No probe got a usable answer; the redirect check could not run.\n" in text
+    assert "No open redirects found" not in text
+
+
+def test_generate_report_incomplete_redirect_check_keeps_finding() -> None:
+    """A finding before the host went quiet is still listed, alongside the incomplete warning."""
+    url = "http://example.com/?next=http://redirect-canary.invalid/"
+    section = _redirect_section(_report(redirect_results=_redirects([url], sent=2, complete=False)))
+    assert f"[VULNERABLE] {url}\n" in section
+    assert "[WARNING] Check incomplete: host stopped answering at probe 2 of 32" in section
+    assert "No open redirects found" not in section
+
+
+def test_generate_report_skipped_redirect_probes_info_line() -> None:
+    """Skipped probes get an [INFO] line with the count and the hedged 'no redirects' wording."""
+    text = _report(redirect_results=_redirects(skipped=3))
+    assert ("[INFO] 3 of 32 probes got no usable answer (timeout or unreadable reply) "
+            "and were skipped\n") in text
+    assert "No open redirects found in the 29 probes that got an answer.\n" in text
+    assert "No open redirects found.\n" not in text
+    assert "[WARNING] Check incomplete" not in text
 
 
 def test_generate_report_ssl_refused_by_winerror_code() -> None:
@@ -324,7 +390,7 @@ def test_generate_report_ssl_domain_mismatch() -> None:
 
 def test_generate_report_is_utf8_encoded() -> None:
     """The report bytes should decode as UTF-8 so the em dash displays correctly."""
-    filename = reporter.generate_report("example.com", [{"port": 22, "banner": None}], NO_HEADERS, [], VALID_SSL)
+    filename = reporter.generate_report("example.com", [{"port": 22, "banner": None}], NO_HEADERS, _redirects(), VALID_SSL)
     assert "—" in Path(filename).read_bytes().decode("utf-8")
 
 
@@ -336,7 +402,7 @@ def test_generate_report_non_cp1252_banner_written_as_utf8() -> None:
 
 def test_generate_report_has_no_utf8_bom() -> None:
     """The report is plain UTF-8 with no byte-order mark (BOM) at the start."""
-    filename = reporter.generate_report("example.com", [], NO_HEADERS, [], VALID_SSL)
+    filename = reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)
     assert not Path(filename).read_bytes().startswith(b"\xef\xbb\xbf")
 
 

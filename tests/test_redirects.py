@@ -27,15 +27,26 @@ def _response(location: str | None = None) -> MagicMock:
 
 
 def _flagged_with_location(location: str) -> list[str]:
-    """Run the check where every probe redirects to `location`; return what was flagged."""
+    """Run the check where every probe redirects to `location`; return the flagged probe URLs."""
     with patch("redirects.requests.get", return_value=_response(location)):
-        return redirects.check_open_redirect("example.com")
+        return redirects.check_open_redirect("example.com")["vulnerable"]
 
 
 def test_check_open_redirect_returns_empty_list_when_nothing_redirects() -> None:
     """No probe gets a redirect, so nothing is vulnerable."""
     with patch("redirects.requests.get", return_value=_response()):
-        assert redirects.check_open_redirect("example.com") == []
+        assert redirects.check_open_redirect("example.com")["vulnerable"] == []
+
+
+def test_check_open_redirect_complete_run_counts_every_probe() -> None:
+    """A normal run: all 32 sent, none skipped, marked complete, base_url recorded."""
+    with patch("redirects.requests.get", return_value=_response()):
+        result = redirects.check_open_redirect("example.com")
+    assert result == {
+        "base_url": "http://example.com", "vulnerable": [], "probes_total": TOTAL_PROBES,
+        "probes_sent": TOTAL_PROBES, "probes_skipped": 0, "complete": True,
+    }
+    assert TOTAL_PROBES == 32
 
 
 def test_check_open_redirect_probes_every_path_and_param() -> None:
@@ -62,7 +73,7 @@ def test_check_open_redirect_flags_location_pointing_to_canary() -> None:
         return _response(redirects.CANARY_URL) if url == LOGIN_NEXT else _response()
 
     with patch("redirects.requests.get", side_effect=fake_get):
-        assert redirects.check_open_redirect("example.com") == [LOGIN_NEXT]
+        assert redirects.check_open_redirect("example.com")["vulnerable"] == [LOGIN_NEXT]
 
 
 def test_check_open_redirect_flags_only_the_matching_probe() -> None:
@@ -72,7 +83,7 @@ def test_check_open_redirect_flags_only_the_matching_probe() -> None:
         return _response(redirects.CANARY_URL) if url == LOGIN_NEXT else _response("/home")
 
     with patch("redirects.requests.get", side_effect=fake_get):
-        assert redirects.check_open_redirect("example.com") == [LOGIN_NEXT]
+        assert redirects.check_open_redirect("example.com")["vulnerable"] == [LOGIN_NEXT]
 
 
 def test_check_open_redirect_ignores_relative_location() -> None:
@@ -116,15 +127,26 @@ def test_check_open_redirect_ignores_location_header_on_non_redirect() -> None:
     response = _response()
     response.headers["Location"] = redirects.CANARY_URL
     with patch("redirects.requests.get", return_value=response):
-        assert redirects.check_open_redirect("example.com") == []
+        assert redirects.check_open_redirect("example.com")["vulnerable"] == []
 
 
 def test_check_open_redirect_stops_on_connection_error() -> None:
     """Connection refused on the first probe: give up at once instead of trying 31 more."""
     err = requests.exceptions.ConnectionError("refused")
     with patch("redirects.requests.get", side_effect=err) as fake_get:
-        assert redirects.check_open_redirect("example.com") == []
+        assert redirects.check_open_redirect("example.com")["vulnerable"] == []
     assert fake_get.call_count == 1
+
+
+def test_check_open_redirect_connection_error_marks_incomplete() -> None:
+    """Refused on probe 1: complete is False and probes_sent counts that one failed attempt."""
+    err = requests.exceptions.ConnectionError("refused")
+    with patch("redirects.requests.get", side_effect=err):
+        result = redirects.check_open_redirect("example.com")
+    assert result["complete"] is False
+    assert result["probes_sent"] == 1
+    assert result["probes_skipped"] == 0
+    assert result["probes_total"] == TOTAL_PROBES
 
 
 def test_check_open_redirect_keeps_findings_when_connect_timeout_stops_scan() -> None:
@@ -134,7 +156,10 @@ def test_check_open_redirect_keeps_findings_when_connect_timeout_stops_scan() ->
         side_effect=[_response(redirects.CANARY_URL), requests.exceptions.ConnectTimeout("no answer")]
     )
     with patch("redirects.requests.get", fake_get):
-        assert redirects.check_open_redirect("example.com") == [first]
+        result = redirects.check_open_redirect("example.com")
+    assert result["vulnerable"] == [first]
+    assert result["probes_sent"] == 2
+    assert result["complete"] is False
     assert fake_get.call_count == 2
 
 
@@ -149,14 +174,21 @@ def test_check_open_redirect_read_timeout_skips_only_that_probe() -> None:
         return _response(redirects.CANARY_URL) if url == LOGIN_NEXT else _response()
 
     with patch("redirects.requests.get", side_effect=fake_get) as mock_get:
-        assert redirects.check_open_redirect("example.com") == [LOGIN_NEXT]
+        result = redirects.check_open_redirect("example.com")
+    assert result["vulnerable"] == [LOGIN_NEXT]
+    assert result["complete"] is True
+    assert result["probes_skipped"] == 1
+    assert result["probes_sent"] == TOTAL_PROBES
     assert mock_get.call_count == TOTAL_PROBES
 
 
 def test_check_open_redirect_garbled_location_does_not_crash() -> None:
     """Location 'http://[oops' makes urljoin raise ValueError; each probe is skipped, none crash."""
     with patch("redirects.requests.get", return_value=_response("http://[oops")) as mock_get:
-        assert redirects.check_open_redirect("example.com") == []
+        result = redirects.check_open_redirect("example.com")
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == TOTAL_PROBES
+    assert result["complete"] is True
     assert mock_get.call_count == TOTAL_PROBES
 
 
@@ -221,15 +253,18 @@ def test_check_open_redirect_skips_probe_on_other_request_error() -> None:
         return _response()
 
     with patch("redirects.requests.get", side_effect=fake_get) as mock_get:
-        assert redirects.check_open_redirect("example.com") == []
+        result = redirects.check_open_redirect("example.com")
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 1
     assert mock_get.call_count == TOTAL_PROBES
 
 
 def test_check_open_redirect_brackets_ipv6_host() -> None:
     """An IPv6 address must be wrapped in [brackets] inside a URL."""
     with patch("redirects.requests.get", return_value=_response()) as fake_get:
-        redirects.check_open_redirect("::1")
+        result = redirects.check_open_redirect("::1")
     assert fake_get.call_args_list[0].args[0].startswith("http://[::1]/")
+    assert result["base_url"] == "http://[::1]"
 
 
 def test_canary_host_is_reserved_invalid_name() -> None:
