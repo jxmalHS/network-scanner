@@ -18,6 +18,19 @@ REDIRECT_RESULTS = {
 
 
 @pytest.fixture(autouse=True)
+def keep_pytest_streams(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Stop main()'s console fix from permanently changing pytest's own capture streams.
+
+    Tests that check the console fix itself (marked by name) still run the real one.
+    """
+    if "redirected" in request.node.name or "reconfigure" in request.node.name:
+        yield
+        return
+    with patch("main._safe_console"):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def fake_signal() -> Iterator[MagicMock]:
     """Never let main() replace pytest's own Ctrl+C handler: record signal.signal calls instead."""
     with patch("main.signal.signal") as fake:
