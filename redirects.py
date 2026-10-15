@@ -58,18 +58,42 @@ class RedirectResults(TypedDict):
 
 
 class _MetaRefreshFinder(HTMLParser):
-    """Remembers the content="..." of the first <meta http-equiv="refresh"> tag."""
+    """Remembers the content="..." of the first <meta http-equiv="refresh"> a browser would obey.
+
+    Reads the page like a browser with JavaScript on: <noscript> content is plain text, and
+    anything inside <template> is inert, so a meta refresh in either is ignored.
+    """
 
     def __init__(self) -> None:
-        super().__init__()
+        try:
+            super().__init__(scripting=True)    # Python 3.14+: <noscript> content read as text
+        except TypeError:                       # older Python: handle_starttag below does the job
+            super().__init__()
         self.content: str | None = None
+        self.template_depth = 0                 # how many <template> elements we're inside
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "meta" or self.content is not None:
+        if tag == "template":
+            self.template_depth += 1
+            return
+        if tag == "noscript":
+            # Everything up to </noscript> is plain text, as in a browser with JavaScript on.
+            # Needed on older Python and for <noscript/>, which html.parser doesn't do this for.
+            self.set_cdata_mode(tag)
+            return
+        if tag != "meta" or self.content is not None or self.template_depth:
             return
         values = {name: value or "" for name, value in attrs}   # names come lower-cased, &amp; decoded
         if values.get("http-equiv", "").strip().lower() == "refresh" and "content" in values:
             self.content = values["content"]
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # Browsers ignore the "/" in <template/>: it still opens a template.
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "template" and self.template_depth:
+            self.template_depth -= 1            # a stray </template> is ignored, as in browsers
 
 
 ASCII_WHITESPACE = "\t\n\x0c\r "     # the only "whitespace" in the HTML refresh rules (not NBSP etc.)

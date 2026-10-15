@@ -1349,3 +1349,109 @@ def test_typed_trickle_last_ask_is_only_what_the_cap_leaves() -> None:
     assert asked[-1] == redirects.MAX_BODY_BYTES % 1000
     assert all(a <= 8192 for a in asked)
     assert sum(min(a, 1000) for a in asked) == redirects.MAX_BODY_BYTES
+
+
+# --- Meta refresh inside <noscript> or <template>: ignored, as a browser with JavaScript on does ---
+
+CANARY_TAG = '<meta http-equiv="refresh" content="0;url=http://redirect-canary.invalid/">'
+SAME_SITE_TAG = '<meta http-equiv="refresh" content="0;url=/login">'
+
+
+def _html(inner: str) -> bytes:
+    return f"<html><head>{inner}</head></html>".encode()
+
+
+@pytest.mark.parametrize("body", [
+    _html(f"<noscript>{CANARY_TAG}</noscript>"),                         # noscript, closed
+    _html(f"<noscript>{CANARY_TAG}"),                                    # noscript never closed
+    _html(f"<template>{CANARY_TAG}</template>"),                         # template content is inert
+    _html(f"<template><template></template>{CANARY_TAG}</template>"),    # still inside the outer one
+    _html(f"<template>{CANARY_TAG}"),                                    # template never closed
+    _html(f"<template/>{CANARY_TAG}"),                                   # "/" ignored: template opens
+], ids=["noscript", "noscript-unclosed", "template", "nested-template", "template-unclosed",
+        "self-closing-template"])
+def test_meta_refresh_in_noscript_or_template_not_flagged(body: bytes) -> None:
+    """A browser with JavaScript on never obeys a meta refresh inside <noscript> or <template>."""
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == []
+    assert result["vulnerable_meta_refresh"] == []
+    assert result["probes_skipped"] == 0
+    assert redirects._meta_refresh_url(body) is None
+
+
+@pytest.mark.parametrize("body", [
+    _html(f"<template>x</template>{CANARY_TAG}"),                        # after a closed template
+    _html(f"<noscript>x</noscript>{CANARY_TAG}"),                        # after a closed noscript
+    _html(f"</template>{CANARY_TAG}"),                                   # stray end tag: depth stays 0
+    _html(f"<noscript>{SAME_SITE_TAG}</noscript>{CANARY_TAG}"),          # ignored meta isn't "first"
+    _html('<meta http-equiv="refresh" content="0;url=http://redirect-canary.invalid/" />'),
+], ids=["after-template", "after-noscript", "stray-end-template", "noscript-meta-not-first",
+        "self-closing-meta"])
+def test_meta_refresh_outside_noscript_and_template_is_flagged(body: bytes) -> None:
+    """Once <noscript>/<template> is closed (or was never opened), the meta refresh counts again."""
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+    assert redirects._meta_refresh_url(body) == "http://redirect-canary.invalid/"
+
+
+def test_untyped_page_meta_refresh_in_noscript_not_flagged() -> None:
+    """A sniffed page (no Content-Type) is read the same way: the <noscript> meta is ignored."""
+    body = f"<html><noscript>{CANARY_TAG}".encode()
+    result = _first_probe_flagged(_page(body, content_type=None))
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+
+
+@pytest.fixture
+def parser_without_scripting() -> Iterator[list[dict]]:
+    """Make HTMLParser act like an older Python that has no `scripting` keyword.
+
+    Yields the list of keyword-argument dicts each __init__ call received, so a test
+    can confirm the fallback path really ran.
+    """
+    original = redirects.HTMLParser.__init__
+    calls: list[dict] = []
+
+    def old_style_init(self, *args, **kwargs):
+        calls.append(kwargs)
+        if "scripting" in kwargs:
+            raise TypeError("__init__() got an unexpected keyword argument 'scripting'")
+        original(self, *args, **kwargs)
+
+    with patch.object(redirects.HTMLParser, "__init__", old_style_init):
+        yield calls
+
+
+def test_fallback_parser_still_ignores_noscript_meta(parser_without_scripting: list[dict]) -> None:
+    """Without scripting=True, <noscript> is still read as plain text, so its meta doesn't count."""
+    body = _html(f"<noscript>{CANARY_TAG}</noscript>")
+    assert redirects._meta_refresh_url(body) is None
+    assert parser_without_scripting == [{"scripting": True}, {}]   # tried the keyword, then fell back
+
+
+def test_fallback_parser_finds_meta_after_noscript(parser_without_scripting: list[dict]) -> None:
+    """In the fallback, </noscript> ends the plain text, so a later meta refresh is found."""
+    body = _html(f"<noscript>{SAME_SITE_TAG}</noscript>{CANARY_TAG}")
+    assert redirects._meta_refresh_url(body) == "http://redirect-canary.invalid/"
+    assert {} in parser_without_scripting
+
+
+def test_fallback_parser_still_ignores_template_meta(parser_without_scripting: list[dict]) -> None:
+    """Template handling doesn't depend on scripting: still ignored in the fallback."""
+    body = _html(f"<template>{CANARY_TAG}</template>")
+    assert redirects._meta_refresh_url(body) is None
+    assert {} in parser_without_scripting
+
+
+@pytest.mark.parametrize("inner", [
+    f"<noscript><template></noscript>{CANARY_TAG}",      # <template> in noscript is just text
+    f"<noscript><!--</noscript>-->{CANARY_TAG}",         # no comments in noscript: </noscript> ends it
+    f"<noscript><script></noscript>{CANARY_TAG}",        # no script in noscript either
+], ids=["template-in-noscript", "comment-in-noscript", "script-in-noscript"])
+@pytest.mark.parametrize("fallback", [False, True], ids=["scripting", "fallback"])
+def test_noscript_content_is_plain_text(inner: str, fallback: bool, request: pytest.FixtureRequest) -> None:
+    """Markup inside <noscript> can't hide a later meta refresh: a browser would still obey it."""
+    if fallback:
+        request.getfixturevalue("parser_without_scripting")
+    assert redirects._meta_refresh_url(_html(inner)) == "http://redirect-canary.invalid/"
