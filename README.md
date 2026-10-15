@@ -75,7 +75,7 @@ python main.py scanme.nmap.org
   the first 64 KB of the page. Neither is ever followed.
 - This applies to any page a browser would show, error pages included (401, 403, 404, 500…),
   a 3xx answer without a `Location`, and a 300 even with one. Only 301/302/303/307/308 with a
-  `Location` count as redirects, and 204/205 answers (no page at all) are never judged.
+  `Location` count as redirects, and 204/205/304 answers (no page to show) are never judged; an invalid Content-Type such as `text` counts as no type.
 - Refresh values are read with the same rules browsers use (so `0url=…` or a delay written in
   non-ASCII digits is ignored, as a browser would), and UTF-16 pages (marked by a byte order
   mark or a `charset=utf-16` in `Content-Type`) are decoded correctly.
@@ -99,6 +99,8 @@ python main.py scanme.nmap.org
 - `scanner.py` — TCP port scanning with service banner grabbing
 - `headers.py` — HTTP security header checks
 - `redirects.py` — open redirect detection
+- `textsafe.py` — makes server-controlled text safe to print (one printable line)
+- `urltools.py` — shared URL helpers (real host of a URL, IPv6 brackets)
 - `ssl_checker.py` — SSL/TLS certificate checks (expiry, issuer, domain match)
 - `reporter.py` — generates timestamped report files
 - `main.py` — CLI interface
