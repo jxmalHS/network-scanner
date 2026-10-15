@@ -1,6 +1,7 @@
 import argparse
 import ipaddress
 import re
+import signal
 import sys
 from scanner import DEFAULT_WORKERS, HostResolutionError, resolve_host, scan_ports
 from headers import check_headers
@@ -81,6 +82,9 @@ def main() -> None:
     try:
         run_scan(args)
     except KeyboardInterrupt:
+        # Already stopping: ignore further Ctrl+C presses while the last scans (at most ~2 s)
+        # finish and files are cleaned up, so Python doesn't print shutdown noise.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         print("\n[!] Scan aborted")   # \n: the terminal echoes ^C on the current line
         sys.exit(130)                  # 128 + 2 (SIGINT): the usual "stopped by Ctrl+C" code
     except HostResolutionError as e:

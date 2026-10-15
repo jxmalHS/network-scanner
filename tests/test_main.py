@@ -17,6 +17,13 @@ REDIRECT_RESULTS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def fake_signal() -> Iterator[MagicMock]:
+    """Never let main() replace pytest's own Ctrl+C handler: record signal.signal calls instead."""
+    with patch("main.signal.signal") as fake:
+        yield fake
+
+
 @pytest.fixture
 def checks() -> Iterator[dict[str, MagicMock]]:
     """Replace every check and the reporter inside main.py with mocks."""
@@ -462,3 +469,28 @@ def test_main_stdout_without_reconfigure_still_runs(
     monkeypatch.setattr("sys.stdout", fake)
     _run(monkeypatch, "localhost")
     assert "Report saved" in fake.getvalue()
+
+
+def test_main_ctrl_c_ignores_further_ctrl_c_before_printing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    checks: dict[str, MagicMock], fake_signal: MagicMock,
+) -> None:
+    """After the first Ctrl+C, further presses are ignored (SIG_IGN) so cleanup finishes quietly."""
+    order: list[str] = []
+    fake_signal.side_effect = lambda *args: order.append("ignore")
+    checks["scan_ports"].side_effect = KeyboardInterrupt
+    monkeypatch.setattr("builtins.print", lambda *a, **k: order.append(" ".join(map(str, a))))
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 130
+    fake_signal.assert_called_once_with(main_module.signal.SIGINT, main_module.signal.SIG_IGN)
+    aborted = next(i for i, line in enumerate(order) if "Scan aborted" in line)
+    assert order.index("ignore") < aborted
+
+
+def test_main_normal_run_leaves_ctrl_c_alone(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], fake_signal: MagicMock
+) -> None:
+    """A scan that isn't interrupted never touches the Ctrl+C handling."""
+    _run(monkeypatch, "localhost")
+    fake_signal.assert_not_called()
