@@ -1,6 +1,8 @@
 """Tests for main.py - argparse handling and wiring of the checks (every check mocked)."""
 import argparse
+import io
 import socket
+import sys
 from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
@@ -437,3 +439,26 @@ def test_main_link_local_ipv6_exits_2_without_scanning(
     assert exc.value.code == 2
     checks["resolve_host"].assert_not_called()
     checks["scan_ports"].assert_not_called()
+
+
+def test_main_redirected_cp1252_stdout_does_not_crash_on_unusual_banner(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """Output saved to a cp1252 file: an unencodable banner prints as '?' instead of crashing."""
+    raw = io.BytesIO()
+    monkeypatch.setattr("sys.stdout", io.TextIOWrapper(raw, encoding="cp1252"))
+    checks["scan_ports"].return_value = [{"port": 22, "banner": "Привет"}]
+    _run(monkeypatch, "localhost")
+    sys.stdout.flush()
+    assert b"Port 22 open" in raw.getvalue()
+    assert b"??????" in raw.getvalue()
+
+
+def test_main_stdout_without_reconfigure_still_runs(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """A stdout replacement without .reconfigure (like StringIO) doesn't break the scan."""
+    fake = io.StringIO()
+    monkeypatch.setattr("sys.stdout", fake)
+    _run(monkeypatch, "localhost")
+    assert "Report saved" in fake.getvalue()

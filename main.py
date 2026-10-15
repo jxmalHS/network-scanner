@@ -57,7 +57,20 @@ def worker_count(value: str) -> int:
     return number
 
 
+def _safe_console() -> None:
+    """Show characters the console can't encode as '?' instead of crashing.
+
+    E.g. with output redirected to a file on Windows (cp1252), a banner with Vietnamese
+    accents would otherwise raise UnicodeEncodeError. The saved report stays full UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)   # StringIO and some wrappers lack it
+        if reconfigure is not None:
+            reconfigure(errors="replace")
+
+
 def main() -> None:
+    _safe_console()
     parser = argparse.ArgumentParser(description="Network Vulnerability Scanner")
     parser.add_argument("host", type=valid_host, help="Target host or IP address")
     parser.add_argument("--ports", nargs="+", type=port_number, default=COMMON_PORTS, help="Ports to scan")
