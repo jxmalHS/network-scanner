@@ -71,21 +71,58 @@ class _MetaRefreshFinder(HTMLParser):
             self.content = values["content"]
 
 
+ASCII_WHITESPACE = "\t\n\x0c\r "     # the only "whitespace" in the HTML refresh rules (not NBSP etc.)
+
+
 def _refresh_url(content: str | None) -> str | None:
     """The URL in a refresh value like '0; url=http://x/' (Refresh header or <meta refresh>).
 
-    Follows the HTML rules loosely: a delay, then ';' or ',', then an optional 'url=' and an
-    optional quote. None when there is no URL (a refresh of the same page) or it is unreadable.
+    Follows the HTML standard's "shared declarative refresh steps": a delay made of ASCII
+    digits and dots, then whitespace, ';' or ',' (so '0url=x' is ignored), then an optional
+    'url =' and an optional quote. Without '=' the whole rest is the URL ('0; url x' -> 'url x').
+    None when there is no URL (a refresh of the same page) or the value is invalid.
     """
     if content is None:
         return None
-    match = re.match(r"\s*[\d.]+\s*[;,]?\s*(?:url\s*=\s*)?(.*)", content, re.IGNORECASE | re.DOTALL)
-    if not match:
+    pos = 0
+    end = len(content)
+
+    def skip_whitespace() -> None:
+        nonlocal pos
+        while pos < end and content[pos] in ASCII_WHITESPACE:
+            pos += 1
+
+    skip_whitespace()
+    delay_start = pos
+    while pos < end and content[pos] in "0123456789":    # not str.isdigit(): that accepts Arabic-Indic digits too
+        pos += 1
+    if pos == delay_start and content[pos:pos + 1] != ".":
+        return None                                       # no delay number: browsers ignore it
+    while pos < end and content[pos] in "0123456789.":
+        pos += 1
+    if pos < end:
+        if content[pos] not in ASCII_WHITESPACE + ";,":
+            return None
+        skip_whitespace()
+        if content[pos:pos + 1] in (";", ","):
+            pos += 1
+        skip_whitespace()
+    if pos >= end:
         return None
-    url = match.group(1).strip()
-    if url[:1] in ("'", '"'):
-        url = url[1:].split(url[0], 1)[0]
-    return url.strip() or None
+    url_start = pos
+    if content[pos:pos + 3].lower() == "url":
+        pos += 3
+        skip_whitespace()
+        if content[pos:pos + 1] == "=":
+            pos += 1
+            skip_whitespace()
+        else:
+            pos = url_start                                # no '=': 'url' is part of the URL itself
+    quote = content[pos:pos + 1] if content[pos:pos + 1] in ("'", '"') else ""
+    url = content[pos + len(quote):]
+    if quote:
+        url = url.split(quote, 1)[0]
+    return url.strip(ASCII_WHITESPACE) or None
 
 
 def _read_capped(response: requests.Response) -> bytes:
@@ -114,11 +151,49 @@ def _read_capped(response: requests.Response) -> bytes:
     return bytes(data[:MAX_BODY_BYTES])
 
 
-def _meta_refresh_url(body: bytes) -> str | None:
+BOMS = (                          # byte order marks, which decide the encoding before anything else
+    (b"\xef\xbb\xbf", "utf-8"),
+    (b"\xfe\xff", "utf-16-be"),
+    (b"\xff\xfe", "utf-16-le"),
+)
+# WHATWG Encoding Standard labels for UTF-16 (any other charset is read as UTF-8, see _decode_body).
+UTF16_LABELS = {
+    "utf-16be": "utf-16-be", "unicodefffe": "utf-16-be",
+    "utf-16": "utf-16-le", "utf-16le": "utf-16-le", "unicode": "utf-16-le", "unicodefeff": "utf-16-le",
+    "ucs-2": "utf-16-le", "iso-10646-ucs-2": "utf-16-le", "csunicode": "utf-16-le",
+}
+
+
+def _charset(content_type: str) -> str:
+    """The charset= value of a Content-Type header, lower-cased ('' if there is none)."""
+    for param in content_type.split(";")[1:]:
+        name, _, value = param.partition("=")
+        if name.strip(ASCII_WHITESPACE).lower() == "charset":
+            return value.strip(ASCII_WHITESPACE).strip("\"'").strip(ASCII_WHITESPACE).lower()
+    return ""
+
+
+def _decode_body(body: bytes, content_type: str) -> str:
+    """The page text, decoded the way a browser picks the encoding.
+
+    A byte order mark wins (and is removed); otherwise a UTF-16 charset in Content-Type is used;
+    otherwise UTF-8. Every other browser encoding keeps plain ASCII as the same bytes, and the
+    canary address is plain ASCII, so reading those pages as UTF-8 finds the same tag.
+    Accepted gap: the rare "replacement" charsets (e.g. iso-2022-kr) make a browser show nothing,
+    so a meta refresh on such a page could be a false alarm.
+    """
+    for bom, encoding in BOMS:
+        if body.startswith(bom):
+            return body[len(bom):].decode(encoding, errors="replace")
+    encoding = UTF16_LABELS.get(_charset(content_type), "utf-8")
+    return body.decode(encoding, errors="replace")
+
+
+def _meta_refresh_url(body: bytes, content_type: str = "") -> str | None:
     """The URL of the first <meta http-equiv="refresh"> in an HTML page, or None."""
     finder = _MetaRefreshFinder()
     try:
-        finder.feed(body.decode("utf-8", errors="replace"))
+        finder.feed(_decode_body(body, content_type))
         finder.close()
     except (AssertionError, ValueError):     # html.parser's ways of giving up on broken markup
         return None                          # treated as "no meta refresh found"
@@ -156,9 +231,10 @@ def _refresh_finding(test: str, response: requests.Response) -> Literal["header"
         return None
     if _points_to_canary(test, _refresh_url(response.headers.get("Refresh"))):
         return "header"
-    if "html" not in response.headers.get("Content-Type", "").lower():
+    content_type = response.headers.get("Content-Type", "")
+    if "html" not in content_type.lower():
         return None
-    if _points_to_canary(test, _meta_refresh_url(_read_capped(response))):
+    if _points_to_canary(test, _meta_refresh_url(_read_capped(response), content_type)):
         return "meta"
     return None
 

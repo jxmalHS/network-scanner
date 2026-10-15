@@ -775,7 +775,7 @@ def _first_probe_flagged(response: MagicMock) -> redirects.RedirectResults:
     _meta("0;url=http://redirect-canary.invalid/?a=1&amp;b=2"),
     b'<META HTTP-EQUIV="REFRESH" CONTENT="0;URL=HTTP://REDIRECT-CANARY.INVALID/">',
     b"<meta http-equiv='Refresh' content='0;url=http://redirect-canary.invalid/' />",
-    b"\xff\xfe broken bytes " + _meta("0;url=http://redirect-canary.invalid/"),
+    b"\xc3\x28\xff broken bytes " + _meta("0;url=http://redirect-canary.invalid/"),
 ])
 def test_meta_refresh_to_canary_is_flagged(body: bytes) -> None:
     """Every spelling of a meta refresh that sends browsers to the canary is a finding."""
@@ -984,10 +984,78 @@ def test_meta_refresh_page_never_requests_the_canary() -> None:
     ("0; url=", None),
     ("soon; url=http://a/", None),   # no delay number: browsers ignore it
     (None, None),
+    ("0url=http://a/", None),        # after the delay must come whitespace, ';' or ','
+    ("0;", None),
+    ("٠; url=http://a/", None),   # Arabic-Indic zero is not an ASCII digit
+    (" 0; url=http://a/", None),  # a no-break space is not ASCII whitespace
+    ("0;url=http://a/ ", "http://a/ "),  # ...so it isn't stripped from the end either
+    (".5; url=http://a/", "http://a/"),
+    ("1.5.2 url=http://a/", "http://a/"),
+    ("\t\n0\r\n,\turl\t=\t'http://a/'", "http://a/"),
+    ("0 http://a/", "http://a/"),
+    ("0; URL=http://a/", "http://a/"),
+    ("0; url x", "url x"),           # no '=': the whole rest is the URL
+    ("0; urlhttp://a/", "urlhttp://a/"),
+    ("0;;url=http://a/", ";url=http://a/"),   # only one separator is skipped
+    ("0; url='http://a/'x'", "http://a/"),
 ])
 def test_refresh_url_parsing(content: str | None, expected: str | None) -> None:
-    """_refresh_url pulls the URL out of a refresh value the way browsers roughly do."""
+    """_refresh_url follows the HTML standard's shared declarative refresh steps."""
     assert redirects._refresh_url(content) == expected
+
+
+@pytest.mark.parametrize("content", [
+    "0url=http://redirect-canary.invalid/",
+    "٠;url=http://redirect-canary.invalid/",
+    " 0;url=http://redirect-canary.invalid/",
+    "0; url x//redirect-canary.invalid/",
+    "0;;url=http://redirect-canary.invalid/",
+])
+def test_refresh_values_browsers_ignore_or_keep_on_site_are_not_flagged(content: str) -> None:
+    """Values a browser rejects, or reads as a same-site relative URL, are not findings."""
+    result = _first_probe_flagged(_page(_meta(content), refresh=content))
+    assert result["vulnerable"] == []
+
+
+# --- Which encoding the page is read in -------------------------------------------
+
+CANARY_HTML = '<html><meta http-equiv="refresh" content="0;url=http://redirect-canary.invalid/">'
+
+
+@pytest.mark.parametrize(("body", "content_type"), [
+    (b"\xff\xfe" + CANARY_HTML.encode("utf-16-le"), "text/html"),
+    (b"\xfe\xff" + CANARY_HTML.encode("utf-16-be"), "text/html"),
+    (b"\xff\xfe" + CANARY_HTML.encode("utf-16-le"), "text/html; charset=utf-8"),   # BOM wins
+    (b"\xef\xbb\xbf" + CANARY_HTML.encode(), "text/html; charset=utf-16"),       # BOM wins
+    (CANARY_HTML.encode("utf-16-le"), "text/html; charset=utf-16"),
+    (CANARY_HTML.encode("utf-16-le"), 'text/html; charset="UTF-16LE"'),
+    (CANARY_HTML.encode("utf-16-be"), "text/html; Charset = utf-16be"),
+    (CANARY_HTML.encode("utf-16-le") + b"\x00", "text/html; charset=utf-16"),     # odd byte count
+    (CANARY_HTML.encode("cp1252"), "text/html; charset=windows-1252"),
+])
+def test_meta_refresh_found_in_browser_encoding(body: bytes, content_type: str) -> None:
+    """UTF-16 pages (by BOM or charset) and other encodings are read the way a browser would."""
+    result = _first_probe_flagged(_page(body, content_type=content_type))
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+@pytest.mark.parametrize(("body", "content_type"), [
+    (CANARY_HTML.encode(), "text/html; charset=utf-16"),       # browser reads it as UTF-16 noise
+    (b"\xff\xfe" + CANARY_HTML.encode(), "text/html; charset=utf-8"),   # BOM says UTF-16
+    (b"\xfe\xff" + CANARY_HTML.encode(), "text/html"),
+])
+def test_meta_refresh_not_found_when_browser_reads_other_encoding(body: bytes, content_type: str) -> None:
+    """The same bytes decoded as UTF-16 are not a meta tag to a browser, so no finding."""
+    result = _first_probe_flagged(_page(body, content_type=content_type))
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+
+
+def test_decode_body_strips_bom_and_survives_odd_bytes() -> None:
+    """The BOM is removed, and a dangling half character becomes a replacement mark, not a crash."""
+    assert redirects._decode_body(b"\xef\xbb\xbfhi", "") == "hi"
+    assert redirects._decode_body(b"\xff\xfeh\x00i\x00", "") == "hi"
+    assert redirects._decode_body(b"h\x00i\x00!", "text/html; charset=utf-16") == "hi�"
 
 
 def test_body_read_stops_at_the_time_limit_for_a_slow_drip_server() -> None:
