@@ -1246,3 +1246,106 @@ def test_refresh_value_with_stray_control_character_still_judged() -> None:
     """A vertical-tab before the URL is dropped like browsers' URL parser does: still flagged."""
     page = _page(content_type=None, refresh="0;\x0bhttp://redirect-canary.invalid/")
     assert _first_probe_flagged(page)["vulnerable_refresh_header"] == [FIRST_HTTP]
+
+
+# --- Untyped pages: only the first SNIFF_BYTES are read until they have been judged ---
+
+
+def _sized_page(body: bytes | None = None, content_type: str | None = None,
+                most: int | None = None) -> tuple[MagicMock, list[int]]:
+    """Fake page whose read1 honours `amt` and records every amt asked for.
+
+    body=None means an endless page of b"a"; `most` caps how many bytes one read hands out
+    (a slow server trickling data). Returns the response and the list of amounts asked for.
+    """
+    response = _page(content_type=content_type)
+    asked: list[int] = []
+    state = {"at": 0}
+
+    def read1(amt: int = 8192, **kwargs: object) -> bytes:
+        asked.append(amt)
+        size = amt if most is None else min(amt, most)
+        if body is None:
+            return b"a" * size
+        chunk = body[state["at"]:state["at"] + size]
+        state["at"] += len(chunk)
+        return chunk
+
+    response.raw.read1.side_effect = read1
+    return response, asked
+
+
+def test_untyped_endless_non_html_page_stops_after_the_sniff_bytes() -> None:
+    """An endless untyped page that isn't HTML: one read of exactly 1445 bytes, then reading stops."""
+    response, asked = _sized_page()
+    result = _first_probe_flagged(response)
+    assert redirects.SNIFF_BYTES == 1445
+    assert asked == [redirects.SNIFF_BYTES]
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+
+
+def test_untyped_html_page_meta_refresh_past_sniff_bytes_is_flagged() -> None:
+    """Sniffed as HTML from its start, so reading goes on and a meta refresh after byte 1445 is found."""
+    body = b"<html>" + b" " * 2000 + CANARY_META
+    response, asked = _sized_page(body)
+    result = _first_probe_flagged(response)
+    assert asked[0] == redirects.SNIFF_BYTES
+    assert len(asked) > 1                                # it kept reading after the judgement
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+def test_untyped_trickle_never_asks_past_the_sniff_bytes() -> None:
+    """100 bytes per read: each ask is exactly what's left of 1445, and reading stops at 1445."""
+    response, asked = _sized_page(most=100)
+    result = _first_probe_flagged(response)
+    expected = [redirects.SNIFF_BYTES - 100 * i for i in range(15)]   # 1445, 1345, ... 45
+    assert asked == expected
+    assert sum(min(a, 100) for a in asked) == redirects.SNIFF_BYTES
+    assert result["vulnerable"] == []
+    assert all(amount > 0 for amount in asked)   # read1(0) would look like the end of the page
+
+
+def test_untyped_short_html_page_ending_before_sniff_bytes_is_flagged() -> None:
+    """A page shorter than 1445 bytes ends (EOF) before the judgement point: still judged and flagged."""
+    assert len(CANARY_META) < redirects.SNIFF_BYTES
+    response, asked = _sized_page(CANARY_META)
+    result = _first_probe_flagged(response)
+    assert asked[0] == redirects.SNIFF_BYTES
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+def test_untyped_page_that_breaks_off_early_uses_what_arrived() -> None:
+    """The connection drops after a short first chunk: what arrived is sniffed, flagged, nothing skipped."""
+    response = _page(content_type=None)
+    response.raw.read1.side_effect = [
+        b"<html>" + CANARY_META,
+        urllib3.exceptions.ProtocolError("connection broken"),
+    ]
+    result = _first_probe_flagged(response)
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+    assert result["probes_skipped"] == 0
+
+
+def test_typed_html_page_first_read_asks_for_a_full_chunk() -> None:
+    """A page that says text/html isn't sniffed, so its first read asks for the normal 8192 bytes."""
+    response, asked = _sized_page(CANARY_META, content_type="text/html")
+    result = _first_probe_flagged(response)
+    assert asked[0] == 8192
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+def test_typed_endless_page_asks_for_exactly_the_body_cap() -> None:
+    """An endless text/html page: the amounts asked for add up to exactly MAX_BODY_BYTES, never more."""
+    response, asked = _sized_page(content_type="text/html")
+    _first_probe_flagged(response)
+    assert sum(asked) == redirects.MAX_BODY_BYTES
+
+
+def test_typed_trickle_last_ask_is_only_what_the_cap_leaves() -> None:
+    """1000 bytes per read: the final ask is the 536 bytes left under 64 KB, not a full 8192."""
+    response, asked = _sized_page(content_type="text/html", most=1000)
+    _first_probe_flagged(response)
+    assert asked[-1] == redirects.MAX_BODY_BYTES % 1000
+    assert all(a <= 8192 for a in asked)
+    assert sum(min(a, 1000) for a in asked) == redirects.MAX_BODY_BYTES

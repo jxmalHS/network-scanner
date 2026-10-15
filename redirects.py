@@ -137,25 +137,34 @@ def _stop_reading(raw) -> None:
         raw.shutdown()
 
 
-def _read_capped(response: requests.Response) -> bytes:
+def _read_capped(response: requests.Response, *, sniff: bool = False) -> bytes:
     """At most MAX_BODY_BYTES of the body, read for at most MAX_BODY_SECONDS in total.
 
     The 5 s socket timeout only limits each single wait, and one read1 call can keep waiting
     (e.g. a gzip header or chunk-size line dripped a byte at a time never produces output).
     So a watchdog timer shuts the connection down when time is up, which makes any stuck
     read fail at once. A body that breaks off halfway gives what arrived.
+    With sniff=True the first SNIFF_BYTES are read on their own and judged once they have all
+    arrived; a page that doesn't look like HTML is not read any further.
     """
     data = bytearray()
     deadline = _now() + MAX_BODY_SECONDS
     watchdog = threading.Timer(MAX_BODY_SECONDS, _stop_reading, args=(response.raw,))
     watchdog.daemon = True
     watchdog.start()
+    judging = sniff                     # still waiting for the first SNIFF_BYTES
     try:
         while len(data) < MAX_BODY_BYTES and _now() < deadline:
-            chunk = response.raw.read1(8192, decode_content=True)
+            amount = (SNIFF_BYTES if judging else MAX_BODY_BYTES) - len(data)   # what the cap leaves
+            amount = min(amount, 8192)                                          # in 8 KB chunks at most
+            chunk = response.raw.read1(amount, decode_content=True)
             if not chunk:
                 break
             data += chunk
+            if judging and len(data) >= SNIFF_BYTES:
+                judging = False
+                if not _sniffs_as_html(bytes(data)):
+                    break               # a browser wouldn't show it as HTML: stop here
     except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError):
         pass
     finally:
@@ -249,7 +258,7 @@ def _refresh_finding(test: str, response: requests.Response) -> Literal["header"
     if _mime_essence(content_type) in HTML_TYPES:
         body = _read_capped(response)
     elif _browser_sniffs(response):
-        body = _read_capped(response)
+        body = _read_capped(response, sniff=True)
         if not _sniffs_as_html(body):
             return None
     else:
