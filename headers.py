@@ -26,6 +26,11 @@ def _hsts_max_age(value: str) -> int | None:
 
     Browsers only use the first HSTS header; requests joins repeated headers with ", ",
     so only the part before the first comma counts (RFC 6797 section 8.1).
+
+    Known limit (accepted): a quoted directive value containing a comma *before* max-age,
+    e.g. 'foo="a,b"; max-age=31536000', cuts the header short and reads as unreadable,
+    so HSTS is reported MISSING ("unreadable"). Real servers don't send this, the result
+    errs on the cautious side, and requests' ", " joining makes an exact split impossible.
     """
     first = value.split(",", 1)[0]
     names, ages = [], []

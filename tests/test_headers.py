@@ -594,3 +594,9 @@ def test_check_headers_no_hsts_short_key_without_hsts() -> None:
     with patch("headers.requests.get", return_value=_response(sent)):
         result = headers.check_headers("example.com")
     assert "hsts_short" not in result
+
+
+def test_hsts_max_age_quoted_comma_limit_is_documented() -> None:
+    """Documented limit: a quoted comma BEFORE max-age reads as unreadable; AFTER it is harmless."""
+    assert headers._hsts_max_age('foo="a,b"; max-age=31536000') is None
+    assert headers._hsts_max_age('max-age=31536000; foo="a,b"') == 31536000
