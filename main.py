@@ -73,8 +73,20 @@ def _safe_console() -> None:
             reconfigure(errors="replace")
 
 
+def _interrupt_once(signum: int, frame: object) -> None:
+    """Ctrl+C handler: the first press stops the scan; later presses are ignored.
+
+    Switching to "ignore" here, at the very first press, also covers the cleanup that runs
+    while the scan unwinds (the last port scans finishing, temp files being removed), so a
+    second press can't interrupt that cleanup and make Python print shutdown noise.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+
 def main() -> None:
     _safe_console()
+    signal.signal(signal.SIGINT, _interrupt_once)
     parser = argparse.ArgumentParser(description="Network Vulnerability Scanner")
     parser.add_argument("host", type=valid_host, help="Target host or IP address")
     parser.add_argument("--ports", nargs="+", type=port_number, default=COMMON_PORTS, help="Ports to scan")
@@ -85,9 +97,6 @@ def main() -> None:
     try:
         had_internal_errors = run_scan(args)
     except KeyboardInterrupt:
-        # Already stopping: ignore further Ctrl+C presses while the last scans (at most ~2 s)
-        # finish and files are cleaned up, so Python doesn't print shutdown noise.
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
         print("\n[!] Scan aborted")   # \n: the terminal echoes ^C on the current line
         sys.exit(130)                  # 128 + 2 (SIGINT): the usual "stopped by Ctrl+C" code
     except HostResolutionError as e:

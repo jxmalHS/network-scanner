@@ -471,29 +471,27 @@ def test_main_stdout_without_reconfigure_still_runs(
     assert "Report saved" in fake.getvalue()
 
 
-def test_main_ctrl_c_ignores_further_ctrl_c_before_printing(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    checks: dict[str, MagicMock], fake_signal: MagicMock,
+def test_main_installs_the_interrupt_once_handler(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], fake_signal: MagicMock
 ) -> None:
-    """After the first Ctrl+C, further presses are ignored (SIG_IGN) so cleanup finishes quietly."""
-    order: list[str] = []
-    fake_signal.side_effect = lambda *args: order.append("ignore")
-    checks["scan_ports"].side_effect = KeyboardInterrupt
-    monkeypatch.setattr("builtins.print", lambda *a, **k: order.append(" ".join(map(str, a))))
-    with pytest.raises(SystemExit) as exc:
-        _run(monkeypatch, "localhost")
-    assert exc.value.code == 130
+    """main() installs _interrupt_once for Ctrl+C before the scan starts."""
+    _run(monkeypatch, "localhost")
+    fake_signal.assert_called_once_with(main_module.signal.SIGINT, main_module._interrupt_once)
+
+
+def test_interrupt_once_ignores_later_presses_then_stops_the_scan(fake_signal: MagicMock) -> None:
+    """The first Ctrl+C switches further presses to "ignore" and then raises KeyboardInterrupt."""
+    with pytest.raises(KeyboardInterrupt):
+        main_module._interrupt_once(main_module.signal.SIGINT, None)
     fake_signal.assert_called_once_with(main_module.signal.SIGINT, main_module.signal.SIG_IGN)
-    aborted = next(i for i, line in enumerate(order) if "Scan aborted" in line)
-    assert order.index("ignore") < aborted
 
 
 def test_main_normal_run_leaves_ctrl_c_alone(
     monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], fake_signal: MagicMock
 ) -> None:
-    """A scan that isn't interrupted never touches the Ctrl+C handling."""
+    """A scan that isn't interrupted only installs the handler; it never switches to "ignore"."""
     _run(monkeypatch, "localhost")
-    fake_signal.assert_not_called()
+    assert (main_module.signal.SIGINT, main_module.signal.SIG_IGN) not in [c.args for c in fake_signal.call_args_list]
 
 
 # --- Safety net: a bug in one check doesn't lose the rest, but stays loud ---------
