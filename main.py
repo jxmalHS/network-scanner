@@ -24,11 +24,14 @@ def valid_host(value: str) -> str:
     except ValueError:
         ip = None
     if ip is not None:
-        if ip.version == 6 and (ip.is_link_local or ip.is_multicast):   # fe80::/10, ff00::/8
+        # Link-local IPv6 (fe80::/10), any multicast (IPv4 224.0.0.0/4, IPv6 ff00::/8) and the
+        # IPv4 broadcast address aren't single hosts you can port-scan.
+        if ((ip.version == 6 and ip.is_link_local) or ip.is_multicast
+                or ip == ipaddress.ip_address("255.255.255.255")):
             raise argparse.ArgumentTypeError(
-                f"link-local and multicast IPv6 addresses (fe80::..., ff..::...) aren't supported: "
-                f"they can't be port-scanned like a single host (link-local ones also need a zone "
-                f"ID naming the network card), so every port would wrongly look closed: {value!r}")
+                f"link-local, multicast and broadcast addresses (fe80::..., ff..::..., "
+                f"224-239.x.x.x, 255.255.255.255) aren't supported: they aren't a single host you "
+                f"can port-scan, so every port would wrongly look closed: {value!r}")
         return value
     if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", value):
         raise argparse.ArgumentTypeError(f"not a plain hostname or IP address: {value!r}")
