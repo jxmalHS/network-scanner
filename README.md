@@ -58,8 +58,15 @@ python main.py scanme.nmap.org
   instead; this is decided by the first answered probe among the first 4.
 - One failed connection only skips that probe; the check stops after 2 failed connections in a
   row, or at once on a TLS/certificate problem.
+- A normal page (status 200, no redirect) can still redirect a browser. The check also looks at
+  a `Refresh:` response header and, for HTML pages only, a `<meta http-equiv="refresh">` tag in
+  the first 64 KB of the page. Neither is ever followed.
+- **JavaScript redirects are not detected.** Spotting them reliably would mean running the
+  page's scripts like a browser does; just searching the page for the test address would flag
+  every page that merely echoes the parameter back, giving false alarms.
 - **Worst case:** at most 36 requests (up to 4 over HTTP, then 32 over HTTPS), about 0.2 s
-  apart — roughly 7 s plus network time (each probe waits at most 5 s for an answer).
+  apart — roughly 7 s plus network time (each probe waits at most 5 s for an answer), and up
+  to 64 KB read from each HTML page.
 - If the check could not finish, or some probes got no usable answer, the console prints
   `[!] Redirect check incomplete — see the report for details`.
 

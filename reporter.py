@@ -107,7 +107,13 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
             f.write(f"[INFO] {r['base_url']} redirects to another host "
                     f"({clean_text(r['offsite_redirect'])}); that host was not tested\n")
         for url in r["vulnerable"]:
-            f.write(f"[VULNERABLE] {url}\n")
+            if url in r.get("vulnerable_meta_refresh", []):
+                how = " (via <meta refresh> in the page)"
+            elif url in r.get("vulnerable_refresh_header", []):
+                how = " (via a Refresh header)"
+            else:
+                how = ""
+            f.write(f"[VULNERABLE] {clean_text(url)}{how}\n")
         # Probes that really got an answer: the one the check stopped on never did.
         answered = r["probes_sent"] - r["probes_skipped"] - (0 if r["complete"] else 1)
         if not r["complete"]:

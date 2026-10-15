@@ -1,5 +1,6 @@
 import re
 import time
+from html.parser import HTMLParser
 from http.cookiejar import DefaultCookiePolicy
 from typing import Literal, NotRequired, TypedDict
 from urllib.parse import urljoin, urlsplit
@@ -20,6 +21,7 @@ PROBE_TIMEOUT = 5        # seconds to wait for each probe
 PROBE_DELAY = 0.2        # pause between probes (seconds), so the target is never flooded
 SWITCH_WINDOW = 4        # the HTTPS switch is decided within the first 4 HTTP probes
 FAILURES_TO_STOP = 2     # give up after this many failed connections in a row
+MAX_BODY_BYTES = 64 * 1024   # read at most 64 KB of a page when looking for <meta refresh>
 
 
 def _browser_target(base: str, location: str) -> str:
@@ -44,6 +46,74 @@ class RedirectResults(TypedDict):
     http_probes_sent: NotRequired[int]   # probes sent over plain HTTP before switching to https:// (0 = no switch)
     stop_reason: NotRequired[Literal["connection", "tls"] | None]  # why an incomplete check stopped
     offsite_redirect: NotRequired[str | None]  # another host the first answered probe redirected to (never requested)
+    vulnerable_meta_refresh: NotRequired[list[str]]    # probe URLs (also in vulnerable) caught by <meta refresh>
+    vulnerable_refresh_header: NotRequired[list[str]]  # probe URLs (also in vulnerable) caught by a Refresh header
+
+
+class _MetaRefreshFinder(HTMLParser):
+    """Remembers the content="..." of the first <meta http-equiv="refresh"> tag."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.content: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "meta" or self.content is not None:
+            return
+        values = {name: value or "" for name, value in attrs}   # names come lower-cased, &amp; decoded
+        if values.get("http-equiv", "").strip().lower() == "refresh" and "content" in values:
+            self.content = values["content"]
+
+
+def _refresh_url(content: str | None) -> str | None:
+    """The URL in a refresh value like '0; url=http://x/' (Refresh header or <meta refresh>).
+
+    Follows the HTML rules loosely: a delay, then ';' or ',', then an optional 'url=' and an
+    optional quote. None when there is no URL (a refresh of the same page) or it is unreadable.
+    """
+    if content is None:
+        return None
+    match = re.match(r"\s*[\d.]+\s*[;,]?\s*(?:url\s*=\s*)?(.*)", content, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    url = match.group(1).strip()
+    if url[:1] in ("'", '"'):
+        url = url[1:].split(url[0], 1)[0]
+    return url.strip() or None
+
+
+def _read_capped(response: requests.Response) -> bytes:
+    """At most MAX_BODY_BYTES of the body; a body that breaks off halfway gives what arrived."""
+    data = bytearray()
+    try:
+        for chunk in response.iter_content(chunk_size=8192):
+            data += chunk
+            if len(data) >= MAX_BODY_BYTES:
+                break
+    except requests.exceptions.RequestException:
+        pass
+    return bytes(data[:MAX_BODY_BYTES])
+
+
+def _meta_refresh_url(body: bytes) -> str | None:
+    """The URL of the first <meta http-equiv="refresh"> in an HTML page, or None."""
+    finder = _MetaRefreshFinder()
+    try:
+        finder.feed(body.decode("utf-8", errors="replace"))
+        finder.close()
+    except (AssertionError, ValueError):     # html.parser's ways of giving up on broken markup
+        return None                          # treated as "no meta refresh found"
+    return _refresh_url(finder.content)
+
+
+def _points_to_canary(test: str, url: str | None) -> bool:
+    """True if a browser at `test` sent to `url` would land on the canary host."""
+    if url is None:
+        return False
+    try:
+        return host_of(_browser_target(test, url)) == CANARY_HOST
+    except (requests.exceptions.RequestException, ValueError):
+        return False        # garbled refresh URL: a browser wouldn't go anywhere useful either
 
 
 def _new_session() -> requests.Session:
@@ -51,6 +121,24 @@ def _new_session() -> requests.Session:
     session = requests.Session()
     session.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))   # accept cookies from no site
     return session
+
+
+def _refresh_finding(test: str, response: requests.Response) -> Literal["header", "meta"] | None:
+    """How a 200 page without a redirect still sends browsers to the canary, if it does.
+
+    Checks the Refresh header first (no body needed), then, for HTML pages only, a
+    <meta http-equiv="refresh"> in the first MAX_BODY_BYTES. JavaScript redirects are not
+    detected: that would need running the page's scripts.
+    """
+    if response.status_code != 200:
+        return None
+    if _points_to_canary(test, _refresh_url(response.headers.get("Refresh"))):
+        return "header"
+    if "html" not in response.headers.get("Content-Type", "").lower():
+        return None
+    if _points_to_canary(test, _meta_refresh_url(_read_capped(response))):
+        return "meta"
+    return None
 
 
 def _is_https_upgrade(test: str, location: str) -> bool:
@@ -81,6 +169,7 @@ def _probe_all(
         "probes_total": len(REDIRECT_PATHS) * len(REDIRECT_PARAMS),
         "probes_sent": 0, "probes_skipped": 0, "complete": True, "switch_reason": None,
         "http_probes_sent": 0, "stop_reason": None, "offsite_redirect": None,
+        "vulnerable_meta_refresh": [], "vulnerable_refresh_header": [],
     }
     deciding = detect_https     # still waiting for the first answered probe to decide the switch
     answered_yet = False
@@ -101,6 +190,7 @@ def _probe_all(
                 with session.get(test, timeout=PROBE_TIMEOUT, allow_redirects=False,
                                  stream=True) as response:
                     location = response.headers.get("Location") if response.is_redirect else None
+                    refresh = _refresh_finding(test, response) if location is None else None
                 points_to_canary = (location is not None
                                     and host_of(_browser_target(test, location)) == CANARY_HOST)
                 upgrade = (location is not None and not points_to_canary
@@ -128,8 +218,12 @@ def _probe_all(
                     return result, "redirect"
                 result["offsite_redirect"] = offsite
             deciding = False
-            if points_to_canary:
+            if points_to_canary or refresh:
                 result["vulnerable"].append(test)
+            if refresh == "header":
+                result["vulnerable_refresh_header"].append(test)
+            elif refresh == "meta":
+                result["vulnerable_meta_refresh"].append(test)
     return result, None
 
 

@@ -541,6 +541,35 @@ def test_generate_report_no_offsite_line_when_none() -> None:
     assert "another host" not in _redirect_section(_report(redirect_results=r))
 
 
+META_URL = "http://example.com/?next=http://redirect-canary.invalid/"
+LOGIN_URL = "http://example.com/login?next=http://redirect-canary.invalid/"
+
+
+def test_generate_report_labels_meta_refresh_finding() -> None:
+    """A finding from a <meta refresh> says so; a plain Location finding has no label."""
+    r = {**_redirects([META_URL, LOGIN_URL]), "vulnerable_meta_refresh": [META_URL]}
+    section = _redirect_section(_report(redirect_results=r))
+    assert f"[VULNERABLE] {META_URL} (via <meta refresh> in the page)\n" in section
+    assert f"[VULNERABLE] {LOGIN_URL}\n" in section
+
+
+def test_generate_report_labels_refresh_header_finding() -> None:
+    """A finding from a Refresh: response header says so."""
+    r = {**_redirects([META_URL]), "vulnerable_refresh_header": [META_URL]}
+    section = _redirect_section(_report(redirect_results=r))
+    assert f"[VULNERABLE] {META_URL} (via a Refresh header)\n" in section
+
+
+def test_generate_report_vulnerable_line_is_cleaned() -> None:
+    """Text on a [VULNERABLE] line goes through clean_text, so it can't add fake lines."""
+    r = {**_redirects([EVIL]), "vulnerable_meta_refresh": [EVIL]}
+    text = _report(redirect_results=r)
+    assert "evil" in text
+    assert not any(line.startswith("[OK] Fake") for line in text.splitlines())
+    assert "\x1b" not in text
+    assert "‮" not in text
+
+
 def test_generate_report_ssl_refused_by_winerror_code() -> None:
     """An SSL error containing WinError 10061 is reported as port 443 closed."""
     text = _report(ssl_results={"error": "[WinError 10061] No connection could be made"})

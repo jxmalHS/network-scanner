@@ -89,7 +89,7 @@ def test_check_open_redirect_complete_run_counts_every_probe() -> None:
         "base_url": "http://example.com", "vulnerable": [], "probes_total": TOTAL_PROBES,
         "probes_sent": TOTAL_PROBES, "probes_skipped": 0, "complete": True,
         "switch_reason": None, "http_probes_sent": 0, "stop_reason": None,
-        "offsite_redirect": None,
+        "offsite_redirect": None, "vulnerable_meta_refresh": [], "vulnerable_refresh_header": [],
     }
     assert TOTAL_PROBES == 32
 
@@ -726,3 +726,203 @@ def test_offsite_redirect_after_https_switch_is_recorded() -> None:
     assert result["switch_reason"] == "redirect"
     assert result["offsite_redirect"] == "https://www.example.com/"
     assert not any("www.example.com" in u for u in _urls(fake_get))
+
+
+# --- Redirects inside a 200 page: <meta http-equiv="refresh"> and the Refresh header ---
+
+
+def _page(body: bytes = b"", content_type: str | None = "text/html; charset=utf-8",
+          refresh: str | None = None, status: int = 200) -> MagicMock:
+    """Fake non-redirect response with a body that iter_content hands out in chunks."""
+    response = _response()
+    response.status_code = status
+    if content_type is not None:
+        response.headers["Content-Type"] = content_type
+    if refresh is not None:
+        response.headers["Refresh"] = refresh
+
+    def iter_content(chunk_size: int = 1, **kwargs: object) -> Iterator[bytes]:
+        return iter([body[i:i + chunk_size] for i in range(0, len(body), chunk_size)])
+
+    response.iter_content.side_effect = iter_content
+    return response
+
+
+def _meta(content: str) -> bytes:
+    return f'<html><head><meta http-equiv="refresh" content="{content}"></head></html>'.encode()
+
+
+def _first_probe_flagged(response: MagicMock) -> redirects.RedirectResults:
+    """Run with probe 1 answered by `response` (all others plain 200s)."""
+    return _run(_answers(response))
+
+
+@pytest.mark.parametrize("body", [
+    _meta("0; url=http://redirect-canary.invalid/"),
+    _meta("0;URL=http://redirect-canary.invalid/"),
+    _meta("5; url='http://redirect-canary.invalid/'"),
+    _meta("0;url=&quot;http://redirect-canary.invalid/&quot;"),
+    _meta("0, http://redirect-canary.invalid/"),
+    _meta("0;url=//redirect-canary.invalid/"),
+    _meta(r"0;url=\\redirect-canary.invalid"),
+    _meta("0;url=http://redirect-canary.invalid/?a=1&amp;b=2"),
+    b'<META HTTP-EQUIV="REFRESH" CONTENT="0;URL=HTTP://REDIRECT-CANARY.INVALID/">',
+    b"<meta http-equiv='Refresh' content='0;url=http://redirect-canary.invalid/' />",
+    b"\xff\xfe broken bytes " + _meta("0;url=http://redirect-canary.invalid/"),
+])
+def test_meta_refresh_to_canary_is_flagged(body: bytes) -> None:
+    """Every spelling of a meta refresh that sends browsers to the canary is a finding."""
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+    assert result["vulnerable_refresh_header"] == []
+
+
+@pytest.mark.parametrize("body", [
+    _meta("0;url=/login?next=http://redirect-canary.invalid/"),   # same site, canary only in query
+    _meta("0;url=http://example.com/?next=http://redirect-canary.invalid/"),
+    _meta("5"),                                                   # refreshes the same page
+    _meta("0;url=http://[oops"),                                  # garbled: no crash, no finding
+    b'<a href="http://redirect-canary.invalid/">echoed link</a>',  # page only echoes the parameter
+    b'<meta name="description" content="0;url=http://redirect-canary.invalid/">',
+    b"",
+])
+def test_meta_refresh_not_flagged(body: bytes) -> None:
+    """Same-site refreshes, no URL, garbled URLs and plain echoes are not findings or skips."""
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == []
+    assert result["vulnerable_meta_refresh"] == []
+    assert result["probes_skipped"] == 0
+    assert result["complete"] is True
+
+
+def test_meta_refresh_garbled_url_with_control_chars_does_not_crash() -> None:
+    """A hostile refresh URL full of escape codes is judged safely (host is the canary: flagged)."""
+    body = _meta("0;url=http://redirect-canary.invalid/\x1b[2J‮\n[OK] fake")
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == [FIRST_HTTP]
+
+
+@pytest.mark.parametrize("response", [
+    _page(_meta("0;url=http://redirect-canary.invalid/"), content_type="application/json"),
+    _page(_meta("0;url=http://redirect-canary.invalid/"), content_type=None),
+    _page(_meta("0;url=http://redirect-canary.invalid/"), status=404),
+])
+def test_body_not_read_unless_200_html(response: MagicMock) -> None:
+    """Non-HTML pages, pages without a Content-Type and non-200 answers are never read."""
+    result = _first_probe_flagged(response)
+    assert result["vulnerable"] == []
+    response.iter_content.assert_not_called()
+
+
+def test_body_not_read_for_redirect_response() -> None:
+    """A 302 is judged by its Location only; its body is never read."""
+    response = _response("/home")
+    response.headers["Content-Type"] = "text/html"
+    _first_probe_flagged(response)
+    response.iter_content.assert_not_called()
+
+
+def test_body_read_is_capped_at_64_kb_and_response_closed() -> None:
+    """An endless page: at most 64 KB is pulled, and the response is still closed afterwards."""
+    response = _page()
+    pulled: list[int] = []
+
+    def endless(chunk_size: int = 1, **kwargs: object) -> Iterator[bytes]:
+        while True:
+            pulled.append(chunk_size)
+            yield b"a" * chunk_size
+
+    response.iter_content.side_effect = endless
+    result = _first_probe_flagged(response)
+    assert sum(pulled) <= redirects.MAX_BODY_BYTES
+    assert redirects.MAX_BODY_BYTES == 64 * 1024
+    assert result["vulnerable"] == []
+    response.__exit__.assert_called()
+    exit_calls = response.__exit__.call_count
+    assert exit_calls == response.__enter__.call_count == 1
+
+
+def test_meta_refresh_after_64_kb_is_not_seen() -> None:
+    """Only the first 64 KB is searched: a meta refresh further down is ignored."""
+    body = b"<html>" + b" " * redirects.MAX_BODY_BYTES + _meta("0;url=http://redirect-canary.invalid/")
+    assert _first_probe_flagged(_page(body))["vulnerable"] == []
+
+
+def test_body_that_breaks_off_uses_what_arrived() -> None:
+    """The connection drops after the meta tag: the finding still counts, and nothing is skipped."""
+    response = _page()
+
+    def broken(chunk_size: int = 1, **kwargs: object) -> Iterator[bytes]:
+        yield _meta("0;url=http://redirect-canary.invalid/")
+        raise requests.exceptions.ChunkedEncodingError("connection broken")
+
+    response.iter_content.side_effect = broken
+    result = _first_probe_flagged(response)
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert result["probes_skipped"] == 0
+
+
+def test_parser_error_means_no_meta_refresh_found() -> None:
+    """If html.parser gives up on hostile markup, the page simply has no meta refresh."""
+    with patch.object(redirects._MetaRefreshFinder, "feed", side_effect=AssertionError("bad markup")):
+        result = _first_probe_flagged(_page(_meta("0;url=http://redirect-canary.invalid/")))
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+
+
+@pytest.mark.parametrize("refresh", [
+    "0; url=http://redirect-canary.invalid/",
+    "0;URL='http://redirect-canary.invalid/'",
+    "3,//redirect-canary.invalid/",
+])
+def test_refresh_header_to_canary_is_flagged_without_reading_body(refresh: str) -> None:
+    """A Refresh: header pointing at the canary is a finding; the body is not needed."""
+    response = _page(content_type=None, refresh=refresh)
+    result = _first_probe_flagged(response)
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert result["vulnerable_refresh_header"] == [FIRST_HTTP]
+    assert result["vulnerable_meta_refresh"] == []
+    response.iter_content.assert_not_called()
+
+
+@pytest.mark.parametrize("refresh", [
+    "0; url=/home",
+    "0; url=/login?next=http://redirect-canary.invalid/",
+    "10",
+    "0;url=http://[oops",
+])
+def test_refresh_header_not_flagged(refresh: str) -> None:
+    """Same-site, URL-less or garbled Refresh headers are not findings."""
+    result = _first_probe_flagged(_page(content_type=None, refresh=refresh))
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+
+
+def test_refresh_header_ignored_on_non_200() -> None:
+    """Refresh on a 404 page is not judged (same rule as the meta refresh)."""
+    response = _page(content_type=None, refresh="0;url=http://redirect-canary.invalid/", status=404)
+    assert _first_probe_flagged(response)["vulnerable"] == []
+
+
+def test_meta_refresh_page_never_requests_the_canary() -> None:
+    """Finding a meta refresh doesn't make the scanner go there: 32 requests, all to example.com."""
+    fake_get = MagicMock(return_value=_page(_meta("0;url=http://redirect-canary.invalid/")))
+    result = _run(fake_get)
+    assert len(result["vulnerable_meta_refresh"]) == TOTAL_PROBES
+    assert fake_get.call_count == TOTAL_PROBES
+    assert all(host_of(u) == "example.com" for u in _urls(fake_get))
+
+
+@pytest.mark.parametrize(("content", "expected"), [
+    ("0; url=http://a/", "http://a/"),
+    ("0;URL = 'http://a/' trailing", "http://a/"),
+    ('0;url="http://a/', "http://a/"),
+    ("0", None),
+    ("0; url=", None),
+    ("soon; url=http://a/", None),   # no delay number: browsers ignore it
+    (None, None),
+])
+def test_refresh_url_parsing(content: str | None, expected: str | None) -> None:
+    """_refresh_url pulls the URL out of a refresh value the way browsers roughly do."""
+    assert redirects._refresh_url(content) == expected
