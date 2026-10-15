@@ -107,6 +107,7 @@ def test_check_headers_all_present_over_https() -> None:
         result = headers.check_headers("example.com")
     assert result == {
         "hsts_max_age": 31536000,
+        "hsts_short": False,
         "url": "https://example.com",
         "present": headers.SECURITY_HEADERS,
         "missing": [],
@@ -567,3 +568,29 @@ def test_check_headers_ssl_error_fallback_has_no_redirect_flag() -> None:
         result = headers.check_headers("example.com")
     assert result["https_tls_problem"] is True
     assert "https_too_many_redirects" not in result
+
+
+@pytest.mark.parametrize(
+    ("hsts_value", "expected_short"),
+    [
+        ("max-age=172800", True),       # 2 days: too short
+        ("max-age=15768000", False),    # exactly 6 months: long enough
+        ("max-age=31536000", False),    # 1 year
+        ("max-age=0", False),           # switched off: reported MISSING, not "short"
+        ("max-age=abc", False),         # unreadable: reported MISSING, not "short"
+    ],
+)
+def test_check_headers_hsts_short_flag(hsts_value: str, expected_short: bool) -> None:
+    """headers.py decides "too short" itself, so the reporter only has to format it."""
+    sent = {**ALL_HEADERS, HSTS: hsts_value}
+    with patch("headers.requests.get", return_value=_response(sent)):
+        result = headers.check_headers("example.com")
+    assert result["hsts_short"] is expected_short
+
+
+def test_check_headers_no_hsts_short_key_without_hsts() -> None:
+    """No HSTS sent: no hsts_short key at all (nothing to judge)."""
+    sent = {k: v for k, v in ALL_HEADERS.items() if k != HSTS}
+    with patch("headers.requests.get", return_value=_response(sent)):
+        result = headers.check_headers("example.com")
+    assert "hsts_short" not in result

@@ -93,6 +93,7 @@ def _fetch(url: str) -> dict:
             # so only a real, positive max-age counts as present.
             max_age = _hsts_max_age(headers[header])
             notes["hsts_max_age"] = max_age
+            notes["hsts_short"] = bool(max_age) and max_age < HSTS_MIN_MAX_AGE
             (present if max_age else missing).append(header)
         elif header in headers:
             present.append(header)

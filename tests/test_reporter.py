@@ -220,11 +220,11 @@ def test_generate_report_tls_problem_wins_over_too_many_redirects() -> None:
 
 # --- HSTS max-age wording ----------------------------------------------------
 
-def _hsts_report(max_age: Any, present: bool) -> str:
-    """Report over HTTPS with HSTS present or missing and the given hsts_max_age."""
+def _hsts_report(max_age: Any, present: bool, short: bool = False) -> str:
+    """Report over HTTPS with HSTS present or missing, the given hsts_max_age and hsts_short flag."""
     hsts = ["Strict-Transport-Security"]
     return _report(header_results={
-        "url": "https://example.com", "hsts_max_age": max_age,
+        "url": "https://example.com", "hsts_max_age": max_age, "hsts_short": short,
         "present": hsts if present else [], "missing": [] if present else hsts,
         "not_applicable": [],
     })
@@ -246,7 +246,7 @@ def test_generate_report_hsts_unreadable_max_age_missing_reason() -> None:
 
 def test_generate_report_short_hsts_max_age_warning() -> None:
     """A present HSTS with a 2-day max-age gets a warning with seconds and days, after [PRESENT]."""
-    text = _hsts_report(172800, present=True)
+    text = _hsts_report(172800, present=True, short=True)
     warning = ("[WARNING] HSTS max-age is only 172800 seconds (about 2 days); "
                "6 months or more is recommended\n")
     assert "[PRESENT] Strict-Transport-Security\n" + warning in text
@@ -254,7 +254,7 @@ def test_generate_report_short_hsts_max_age_warning() -> None:
 
 def test_generate_report_short_hsts_under_a_day_shows_seconds_only() -> None:
     """A max-age under one day doesn't print the odd "about 0 days"."""
-    text = _hsts_report(300, present=True)
+    text = _hsts_report(300, present=True, short=True)
     assert "[WARNING] HSTS max-age is only 300 seconds; 6 months or more is recommended\n" in text
     assert "about 0 days" not in text
 
@@ -593,3 +593,8 @@ def test_generate_report_cert_problem_without_error_text_does_not_crash() -> Non
     """A cert_problem with no 'error' key still writes the report, with 'no details'."""
     text = _report(ssl_results={"cert_problem": "expired"})
     assert "[CRITICAL] Certificate rejected: has expired\nDetails: no details\n" in text
+
+
+def test_reporter_does_not_import_hsts_threshold() -> None:
+    """The reporter only formats results; the "too short" threshold lives in headers.py."""
+    assert not hasattr(reporter, "HSTS_MIN_MAX_AGE")

@@ -1,7 +1,6 @@
 import re
 from datetime import datetime
 
-from headers import HSTS_MIN_MAX_AGE
 from textsafe import clean_text
 
 # Plain-English reason for each cert_problem word from ssl_checker.
@@ -82,8 +81,7 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
             max_age = header_results.get("hsts_max_age")
             for header in header_results["present"]:
                 f.write(f"[PRESENT] {header}\n")
-            if "Strict-Transport-Security" in header_results["present"] and max_age \
-                    and max_age < HSTS_MIN_MAX_AGE:
+            if header_results.get("hsts_short"):    # headers.py decides what counts as too short
                 days = f" (about {max_age // 86400} days)" if max_age >= 86400 else ""
                 f.write(f"[WARNING] HSTS max-age is only {max_age} seconds{days}; "
                         f"6 months or more is recommended\n")
