@@ -183,6 +183,38 @@ def test_main_prints_security_headers_progress(
     assert "[*] Checking security headers...\n" in capsys.readouterr().out
 
 
+REDIRECT_INCOMPLETE = "[!] Redirect check incomplete — see the report for details\n"
+
+
+def test_main_no_redirect_warning_after_clean_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A complete redirect check with nothing skipped prints no warning line."""
+    _run(monkeypatch, "localhost")
+    assert "Redirect check incomplete" not in capsys.readouterr().out
+
+
+def test_main_warns_when_redirect_check_incomplete(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """complete False: the console says so right after the redirect step, before the SSL step."""
+    checks["check_open_redirect"].return_value = {**REDIRECT_RESULTS, "complete": False, "probes_sent": 2}
+    _run(monkeypatch, "localhost")
+    out = capsys.readouterr().out
+    assert REDIRECT_INCOMPLETE in out
+    assert out.index("[*] Checking for open redirects...") < out.index(REDIRECT_INCOMPLETE)
+    assert out.index(REDIRECT_INCOMPLETE) < out.index("[*] Checking SSL/TLS certificate...")
+
+
+def test_main_warns_when_redirect_probes_skipped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A complete check where some probes were skipped also gets the warning line."""
+    checks["check_open_redirect"].return_value = {**REDIRECT_RESULTS, "probes_skipped": 3}
+    _run(monkeypatch, "localhost")
+    assert REDIRECT_INCOMPLETE in capsys.readouterr().out
+
+
 # --- valid_host: which targets argparse accepts ------------------------------
 
 GOOD_HOSTS = ["localhost", "scanme.nmap.org", "192.168.56.101", "::1"]

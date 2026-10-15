@@ -47,6 +47,22 @@ python main.py <host> --workers 50
 python main.py scanme.nmap.org
 ```
 
+## How the open redirect check behaves
+
+- It sends 32 probes (4 pages × 8 parameters) that point at a reserved `.invalid` address, and
+  **never follows a redirect** — it only reads where the server says to go. Only the target
+  host is ever contacted.
+- Probes go out one at a time with a 0.2 s pause between them, through one connection client
+  that stores no cookies (so every probe is independent).
+- If plain HTTP redirects to HTTPS (or can't be reached), the probes are sent to `https://`
+  instead; this is decided by the first answered probe among the first 4.
+- One failed connection only skips that probe; the check stops after 2 failed connections in a
+  row, or at once on a TLS/certificate problem.
+- **Worst case:** at most 36 requests (up to 4 over HTTP, then 32 over HTTPS), about 0.2 s
+  apart — roughly 7 s plus network time (each probe waits at most 5 s for an answer).
+- If the check could not finish, or some probes got no usable answer, the console prints
+  `[!] Redirect check incomplete — see the report for details`.
+
 ## Project Structure
 
 - `scanner.py` — TCP port scanning with service banner grabbing

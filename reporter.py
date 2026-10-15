@@ -94,14 +94,28 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
         f.write("-" * 20 + "\n")
         r = redirect_results
         http_url = r["base_url"].replace("https://", "http://", 1)
+        http_sent = r.get("http_probes_sent") or 0
+        earlier = (f" (plus {http_sent} earlier probe{'' if http_sent == 1 else 's'} over HTTP)"
+                   if http_sent else "")
         if r.get("switch_reason") == "redirect":
-            f.write(f"[INFO] {http_url} redirects to HTTPS; probes were sent to {r['base_url']} instead\n")
+            f.write(f"[INFO] {http_url} redirects to HTTPS; probes were sent to {r['base_url']} "
+                    f"instead{earlier}\n")
         elif r.get("switch_reason") == "no_http":
-            f.write(f"[INFO] {http_url} could not be reached; probes were sent to {r['base_url']} instead\n")
+            f.write(f"[INFO] {http_url} could not be reached; probes were sent to {r['base_url']} "
+                    f"instead{earlier}\n")
+        if r.get("offsite_redirect"):
+            f.write(f"[INFO] {r['base_url']} redirects to another host "
+                    f"({clean_text(r['offsite_redirect'])}); that host was not tested\n")
         for url in r["vulnerable"]:
             f.write(f"[VULNERABLE] {url}\n")
+        # Probes that really got an answer: the one the check stopped on never did.
+        answered = r["probes_sent"] - r["probes_skipped"] - (0 if r["complete"] else 1)
         if not r["complete"]:
-            if r["probes_sent"] == 1:
+            if r.get("stop_reason") == "tls":
+                where = ("; no probes were answered" if answered == 0 else
+                         f" at probe {r['probes_sent']} of {r['probes_total']}; the rest were not sent")
+                f.write(f"[WARNING] Check incomplete: TLS/certificate problem with {r['base_url']}{where}\n")
+            elif answered == 0:
                 f.write(f"[WARNING] Check incomplete: could not connect to {r['base_url']}; "
                         f"no probes were answered\n")
             else:
@@ -109,10 +123,9 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
                         f"{r['probes_sent']} of {r['probes_total']}; the rest were not sent\n")
         if r["probes_skipped"]:
             f.write(f"[INFO] {r['probes_skipped']} of {r['probes_total']} probes got no usable "
-                    f"answer (timeout or unreadable reply) and were skipped\n")
+                    f"answer (timeout, dropped connection or unreadable reply) and were skipped\n")
         if not r["vulnerable"]:
             # Only claim a clean result for probes that actually got an answer.
-            answered = r["probes_sent"] - r["probes_skipped"] - (0 if r["complete"] else 1)
             if answered == 0:
                 f.write("[WARNING] No probe got a usable answer; the redirect check could not run.\n")
             elif r["complete"] and not r["probes_skipped"]:

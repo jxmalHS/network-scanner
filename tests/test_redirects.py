@@ -1,9 +1,13 @@
-"""Tests for redirects.py - open redirect check (requests.get mocked, nothing is ever sent)."""
-from unittest.mock import MagicMock, patch
+"""Tests for redirects.py - open redirect check (requests.Session mocked, nothing is ever sent)."""
+import email.message
+from collections.abc import Iterator
+from http.cookiejar import DefaultCookiePolicy
+from unittest.mock import MagicMock, call, patch
 from urllib.parse import urlparse
 
 import pytest
 import requests
+from requests.cookies import MockRequest, MockResponse
 from requests.structures import CaseInsensitiveDict
 
 import redirects
@@ -11,6 +15,15 @@ from urltools import host_of
 
 TOTAL_PROBES = len(redirects.REDIRECT_PATHS) * len(redirects.REDIRECT_PARAMS)
 LOGIN_NEXT = f"http://example.com/login?next={redirects.CANARY_URL}"
+FIRST_HTTP = f"http://example.com/?next={redirects.CANARY_URL}"
+REFUSED = requests.exceptions.ConnectionError("refused")
+
+
+@pytest.fixture(autouse=True)
+def fake_sleep() -> Iterator[MagicMock]:
+    """Never really pause between probes in tests; the mock records each pause instead."""
+    with patch("redirects.time.sleep") as sleep:
+        yield sleep
 
 
 def _response(location: str | None = None) -> MagicMock:
@@ -19,6 +32,7 @@ def _response(location: str | None = None) -> MagicMock:
     response.__enter__.return_value = response
     response.__exit__.return_value = False
     response.is_redirect = location is not None
+    response.status_code = 302 if location is not None else 200
     headers = CaseInsensitiveDict()
     if location is not None:
         headers["Location"] = location
@@ -26,45 +40,176 @@ def _response(location: str | None = None) -> MagicMock:
     return response
 
 
+def _session(fake_get: MagicMock) -> MagicMock:
+    """Fake requests.Session whose .get is fake_get, also when used in a `with` block."""
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.__exit__.return_value = False
+    session.get = fake_get
+    return session
+
+
+def _run(fake_get: MagicMock, host: str = "example.com") -> redirects.RedirectResults:
+    """Run the check with every request going to fake_get."""
+    with patch("redirects.requests.Session", return_value=_session(fake_get)):
+        return redirects.check_open_redirect(host)
+
+
+def _urls(fake_get: MagicMock) -> list[str]:
+    return [c.args[0] for c in fake_get.call_args_list]
+
+
+def _answers(*responses: object) -> MagicMock:
+    """Fake get that answers probe 1, 2, ... with the given responses/exceptions, then plain 200s."""
+    queue = list(responses)
+
+    def fake_get(url: str, **kwargs: object) -> MagicMock:
+        item = queue.pop(0) if queue else _response()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    return MagicMock(side_effect=fake_get)
+
+
 def _flagged_with_location(location: str) -> list[str]:
     """Run the check where every probe redirects to `location`; return the flagged probe URLs."""
-    with patch("redirects.requests.get", return_value=_response(location)):
-        return redirects.check_open_redirect("example.com")["vulnerable"]
+    return _run(MagicMock(return_value=_response(location)))["vulnerable"]
 
 
 def test_check_open_redirect_returns_empty_list_when_nothing_redirects() -> None:
     """No probe gets a redirect, so nothing is vulnerable."""
-    with patch("redirects.requests.get", return_value=_response()):
-        assert redirects.check_open_redirect("example.com")["vulnerable"] == []
+    assert _run(MagicMock(return_value=_response()))["vulnerable"] == []
 
 
 def test_check_open_redirect_complete_run_counts_every_probe() -> None:
     """A normal run: all 32 sent, none skipped, marked complete, base_url recorded."""
-    with patch("redirects.requests.get", return_value=_response()):
-        result = redirects.check_open_redirect("example.com")
+    result = _run(MagicMock(return_value=_response()))
     assert result == {
         "base_url": "http://example.com", "vulnerable": [], "probes_total": TOTAL_PROBES,
         "probes_sent": TOTAL_PROBES, "probes_skipped": 0, "complete": True,
-        "switch_reason": None,
+        "switch_reason": None, "http_probes_sent": 0, "stop_reason": None,
+        "offsite_redirect": None,
     }
     assert TOTAL_PROBES == 32
 
 
 def test_check_open_redirect_probes_every_path_and_param() -> None:
     """One request per path x param (32), covering every path, not just the root (backlog #6)."""
-    with patch("redirects.requests.get", return_value=_response()) as fake_get:
-        redirects.check_open_redirect("example.com")
+    fake_get = MagicMock(return_value=_response())
+    _run(fake_get)
     assert fake_get.call_count == TOTAL_PROBES
-    probed_paths = {urlparse(call.args[0]).path for call in fake_get.call_args_list}
-    assert probed_paths == set(redirects.REDIRECT_PATHS)
+    assert {urlparse(u).path for u in _urls(fake_get)} == set(redirects.REDIRECT_PATHS)
 
 
 def test_check_open_redirect_never_follows_redirects() -> None:
     """Every request uses a 5 s timeout, allow_redirects=False and stream=True."""
-    with patch("redirects.requests.get", return_value=_response()) as fake_get:
+    fake_get = MagicMock(return_value=_response())
+    _run(fake_get)
+    for c in fake_get.call_args_list:
+        assert c.kwargs == {"timeout": 5, "allow_redirects": False, "stream": True}
+
+
+# --- One Session per check, cookies off, a pause between probes ----------------
+
+
+def test_check_open_redirect_uses_one_session_and_never_plain_requests_get() -> None:
+    """Even with an HTTPS switch, one Session sends every probe; requests.get is never used."""
+    fake_get = _answers(_response("https://example.com/"))
+    with (
+        patch("redirects.requests.Session", return_value=_session(fake_get)) as session_class,
+        patch("redirects.requests.get") as plain_get,
+    ):
         redirects.check_open_redirect("example.com")
-    for call in fake_get.call_args_list:
-        assert call.kwargs == {"timeout": 5, "allow_redirects": False, "stream": True}
+    session_class.assert_called_once_with()
+    plain_get.assert_not_called()
+    assert fake_get.call_count == TOTAL_PROBES + 1
+
+
+def test_check_open_redirect_closes_the_session() -> None:
+    """The session is used in a `with` block, so its connections are closed at the end."""
+    session = _session(MagicMock(return_value=_response()))
+    with patch("redirects.requests.Session", return_value=session):
+        redirects.check_open_redirect("example.com")
+    session.__exit__.assert_called_once()
+
+
+def test_check_open_redirect_never_disables_certificate_checks() -> None:
+    """No probe ever passes verify=False (or any verify setting at all)."""
+    fake_get = _answers(_response("https://example.com/"))
+    _run(fake_get)
+    assert all("verify" not in c.kwargs for c in fake_get.call_args_list)
+
+
+def _store_set_cookie(jar: requests.cookies.RequestsCookieJar) -> None:
+    """Feed the jar a 'Set-Cookie: sid=abc' reply from http://example.com/ (nothing is sent)."""
+    headers = email.message.Message()
+    headers["Set-Cookie"] = "sid=abc; Path=/"
+    request = requests.Request("GET", "http://example.com/").prepare()
+    jar.extract_cookies(MockResponse(headers), MockRequest(request))
+
+
+def test_new_session_refuses_all_cookies() -> None:
+    """A real session from _new_session() stores no cookie the server sets: probes stay independent."""
+    session = redirects._new_session()
+    try:
+        policy = session.cookies.get_policy()
+        assert isinstance(policy, DefaultCookiePolicy)
+        assert tuple(policy.allowed_domains()) == ()
+        _store_set_cookie(session.cookies)
+        assert len(session.cookies) == 0
+        assert session.verify is True
+    finally:
+        session.close()
+
+
+def test_plain_session_would_store_the_cookie() -> None:
+    """Control for the test above: without the policy, the same reply does store a cookie."""
+    session = requests.Session()
+    try:
+        _store_set_cookie(session.cookies)
+        assert len(session.cookies) == 1
+    finally:
+        session.close()
+
+
+def test_new_session_sets_cookie_policy_on_the_session() -> None:
+    """With the Session mocked, _new_session still installs the no-cookies policy."""
+    with patch("redirects.requests.Session"):
+        session = redirects._new_session()
+    policy = session.cookies.set_policy.call_args.args[0]
+    assert tuple(policy.allowed_domains()) == ()
+
+
+def test_clean_run_pauses_31_times_never_before_first_probe(fake_sleep: MagicMock) -> None:
+    """32 probes -> 31 pauses of PROBE_DELAY, and the very first request goes out without one."""
+    events: list[str] = []
+    fake_sleep.side_effect = lambda seconds: events.append("sleep")
+
+    def fake_get(url: str, **kwargs: object) -> MagicMock:
+        events.append("get")
+        return _response()
+
+    _run(MagicMock(side_effect=fake_get))
+    assert events[0] == "get"
+    assert events.count("get") == TOTAL_PROBES
+    assert events.count("sleep") == TOTAL_PROBES - 1
+    assert "sleep sleep" not in " ".join(events)    # one pause between two requests, no more
+    assert fake_sleep.call_args_list == [call(redirects.PROBE_DELAY)] * (TOTAL_PROBES - 1)
+
+
+def test_switched_run_pauses_before_every_https_probe(fake_sleep: MagicMock) -> None:
+    """1 HTTP probe + 32 HTTPS probes = 33 requests -> 32 pauses (also before the first HTTPS one)."""
+    _run(_answers(_response("https://example.com/")))
+    assert fake_sleep.call_count == TOTAL_PROBES
+
+
+def test_probe_delay_is_small_and_positive() -> None:
+    """The pause keeps the check polite (at most 5 requests a second) without making it slow."""
+    assert redirects.PROBE_DELAY == 0.2
+
+
+# --- Judging the Location header ---------------------------------------------
 
 
 def test_check_open_redirect_flags_location_pointing_to_canary() -> None:
@@ -73,8 +218,7 @@ def test_check_open_redirect_flags_location_pointing_to_canary() -> None:
     def fake_get(url: str, **kwargs: object) -> MagicMock:
         return _response(redirects.CANARY_URL) if url == LOGIN_NEXT else _response()
 
-    with patch("redirects.requests.get", side_effect=fake_get):
-        assert redirects.check_open_redirect("example.com")["vulnerable"] == [LOGIN_NEXT]
+    assert _run(MagicMock(side_effect=fake_get))["vulnerable"] == [LOGIN_NEXT]
 
 
 def test_check_open_redirect_flags_only_the_matching_probe() -> None:
@@ -83,8 +227,7 @@ def test_check_open_redirect_flags_only_the_matching_probe() -> None:
     def fake_get(url: str, **kwargs: object) -> MagicMock:
         return _response(redirects.CANARY_URL) if url == LOGIN_NEXT else _response("/home")
 
-    with patch("redirects.requests.get", side_effect=fake_get):
-        assert redirects.check_open_redirect("example.com")["vulnerable"] == [LOGIN_NEXT]
+    assert _run(MagicMock(side_effect=fake_get))["vulnerable"] == [LOGIN_NEXT]
 
 
 def test_check_open_redirect_ignores_relative_location() -> None:
@@ -127,77 +270,7 @@ def test_check_open_redirect_ignores_location_header_on_non_redirect() -> None:
     """A 200 response that happens to carry a Location header is not a redirect."""
     response = _response()
     response.headers["Location"] = redirects.CANARY_URL
-    with patch("redirects.requests.get", return_value=response):
-        assert redirects.check_open_redirect("example.com")["vulnerable"] == []
-
-
-def test_check_open_redirect_stops_on_connection_error() -> None:
-    """Refused on HTTP probe 1, then on HTTPS probe 1 too: one try each, then give up (2 calls)."""
-    err = requests.exceptions.ConnectionError("refused")
-    with patch("redirects.requests.get", side_effect=err) as fake_get:
-        result = redirects.check_open_redirect("example.com")
-    assert fake_get.call_count == 2
-    assert fake_get.call_args_list[0].args[0].startswith("http://example.com/")
-    assert fake_get.call_args_list[1].args[0].startswith("https://example.com/")
-    assert result["vulnerable"] == []
-    assert result["base_url"] == "https://example.com"
-    assert result["switch_reason"] == "no_http"
-    assert result["complete"] is False
-    assert result["probes_sent"] == 1
-
-
-def test_check_open_redirect_connection_error_marks_incomplete() -> None:
-    """Refused on probe 1: complete is False and probes_sent counts that one failed attempt."""
-    err = requests.exceptions.ConnectionError("refused")
-    with patch("redirects.requests.get", side_effect=err):
-        result = redirects.check_open_redirect("example.com")
-    assert result["complete"] is False
-    assert result["probes_sent"] == 1
-    assert result["probes_skipped"] == 0
-    assert result["probes_total"] == TOTAL_PROBES
-
-
-def test_check_open_redirect_keeps_findings_when_connect_timeout_stops_scan() -> None:
-    """First probe is vulnerable, second can't even connect (ConnectTimeout): keep the find and stop."""
-    first = f"http://example.com/?next={redirects.CANARY_URL}"
-    fake_get = MagicMock(
-        side_effect=[_response(redirects.CANARY_URL), requests.exceptions.ConnectTimeout("no answer")]
-    )
-    with patch("redirects.requests.get", fake_get):
-        result = redirects.check_open_redirect("example.com")
-    assert result["vulnerable"] == [first]
-    assert result["probes_sent"] == 2
-    assert result["complete"] is False
-    assert fake_get.call_count == 2
-
-
-def test_check_open_redirect_read_timeout_skips_only_that_probe() -> None:
-    """The first probe connects but the page is slow (ReadTimeout): skip it, keep scanning,
-    and still report a vulnerable probe that comes later."""
-    first = f"http://example.com/?next={redirects.CANARY_URL}"
-
-    def fake_get(url: str, **kwargs: object) -> MagicMock:
-        if url == first:
-            raise requests.exceptions.ReadTimeout("slow page")
-        return _response(redirects.CANARY_URL) if url == LOGIN_NEXT else _response()
-
-    with patch("redirects.requests.get", side_effect=fake_get) as mock_get:
-        result = redirects.check_open_redirect("example.com")
-    assert result["vulnerable"] == [LOGIN_NEXT]
-    assert result["complete"] is True
-    assert result["probes_skipped"] == 1
-    assert result["probes_sent"] == TOTAL_PROBES
-    assert mock_get.call_count == TOTAL_PROBES
-
-
-def test_check_open_redirect_garbled_location_does_not_crash() -> None:
-    """Location 'http://[oops' makes urljoin raise ValueError; each probe is skipped, none crash."""
-    with patch("redirects.requests.get", return_value=_response("http://[oops")) as mock_get:
-        result = redirects.check_open_redirect("example.com")
-    assert result["vulnerable"] == []
-    assert result["probes_skipped"] == TOTAL_PROBES
-    assert result["complete"] is True
-    assert mock_get.call_count == TOTAL_PROBES
+    assert _run(MagicMock(return_value=response))["vulnerable"] == []
 
 
 @pytest.mark.parametrize(
@@ -252,26 +325,11 @@ def test_browser_target_strips_surrounding_whitespace() -> None:
     assert redirects._browser_target(LOGIN_NEXT, "  /home  ") == "http://example.com/home"
 
 
-def test_check_open_redirect_skips_probe_on_other_request_error() -> None:
-    """An odd error (InvalidURL) skips only that probe; the other 31 still run."""
-
-    def fake_get(url: str, **kwargs: object) -> MagicMock:
-        if url == LOGIN_NEXT:
-            raise requests.exceptions.InvalidURL("bad")
-        return _response()
-
-    with patch("redirects.requests.get", side_effect=fake_get) as mock_get:
-        result = redirects.check_open_redirect("example.com")
-    assert result["vulnerable"] == []
-    assert result["probes_skipped"] == 1
-    assert mock_get.call_count == TOTAL_PROBES
-
-
 def test_check_open_redirect_brackets_ipv6_host() -> None:
     """An IPv6 address must be wrapped in [brackets] inside a URL."""
-    with patch("redirects.requests.get", return_value=_response()) as fake_get:
-        result = redirects.check_open_redirect("::1")
-    assert fake_get.call_args_list[0].args[0].startswith("http://[::1]/")
+    fake_get = MagicMock(return_value=_response())
+    result = _run(fake_get, host="::1")
+    assert _urls(fake_get)[0].startswith("http://[::1]/")
     assert result["base_url"] == "http://[::1]"
 
 
@@ -281,27 +339,142 @@ def test_canary_host_is_reserved_invalid_name() -> None:
     assert redirects.CANARY_URL == f"http://{redirects.CANARY_HOST}/"
 
 
-# --- Backlog #25: switch to https:// when plain HTTP redirects there or can't be reached ---
+# --- Failures: skipped probes, and stopping after 2 failed connections in a row ---
 
-FIRST_HTTP = f"http://example.com/?next={redirects.CANARY_URL}"
+
+def test_check_open_redirect_stops_on_connection_error() -> None:
+    """Refused twice over HTTP, then twice over HTTPS: give up after 4 requests in total."""
+    fake_get = MagicMock(side_effect=REFUSED)
+    result = _run(fake_get)
+    urls = _urls(fake_get)
+    assert fake_get.call_count == 4
+    assert all(u.startswith("http://example.com/") for u in urls[:2])
+    assert all(u.startswith("https://example.com/") for u in urls[2:])
+    assert result["vulnerable"] == []
+    assert result["base_url"] == "https://example.com"
+    assert result["switch_reason"] == "no_http"
+    assert result["http_probes_sent"] == 2
+    assert result["complete"] is False
+    assert result["stop_reason"] == "connection"
+
+
+def test_check_open_redirect_connection_error_marks_incomplete() -> None:
+    """Refused twice: incomplete; the 1st failure counts as skipped, the 2nd is where it stopped."""
+    result = _run(MagicMock(side_effect=REFUSED))
+    assert result["complete"] is False
+    assert result["probes_sent"] == 2
+    assert result["probes_skipped"] == 1
+    assert result["probes_total"] == TOTAL_PROBES
+
+
+def test_one_dropped_connection_only_skips_that_probe() -> None:
+    """A single ConnectionError mid-run is skipped; the check goes on and stays complete."""
+    fake_get = _answers(_response(), _response(), REFUSED)
+    result = _run(fake_get)
+    assert fake_get.call_count == TOTAL_PROBES
+    assert result["complete"] is True
+    assert result["probes_skipped"] == 1
+    assert result["stop_reason"] is None
+
+
+def test_two_dropped_connections_in_a_row_stop_the_check() -> None:
+    """Probes 3 and 4 both fail to connect: stop at probe 4 with stop_reason 'connection'."""
+    fake_get = _answers(_response(), _response(), REFUSED, REFUSED)
+    result = _run(fake_get)
+    assert fake_get.call_count == 4
+    assert result["complete"] is False
+    assert result["probes_sent"] == 4
+    assert result["probes_skipped"] == 1
+    assert result["stop_reason"] == "connection"
+    assert result["switch_reason"] is None
+    assert result["base_url"] == "http://example.com"
+
+
+def test_failure_count_resets_after_an_answered_probe() -> None:
+    """fail, answer, fail, answer, ...: never two in a row, so the check runs to the end."""
+    fake_get = _answers(*([REFUSED, _response()] * (TOTAL_PROBES // 2)))
+    result = _run(fake_get)
+    assert fake_get.call_count == TOTAL_PROBES
+    assert result["complete"] is True
+    assert result["probes_skipped"] == TOTAL_PROBES // 2
+
+
+def test_check_open_redirect_keeps_findings_when_connect_timeout_stops_scan() -> None:
+    """Probe 1 is vulnerable, then two connect timeouts in a row: keep the find and stop."""
+    timeout = requests.exceptions.ConnectTimeout("no answer")
+    fake_get = _answers(_response(redirects.CANARY_URL), timeout, timeout)
+    result = _run(fake_get)
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert result["probes_sent"] == 3
+    assert result["complete"] is False
+    assert fake_get.call_count == 3
+
+
+def test_check_open_redirect_read_timeout_skips_only_that_probe() -> None:
+    """The first probe connects but the page is slow (ReadTimeout): skip it, keep scanning,
+    and still report a vulnerable probe that comes later."""
+
+    def fake_get(url: str, **kwargs: object) -> MagicMock:
+        if url == FIRST_HTTP:
+            raise requests.exceptions.ReadTimeout("slow page")
+        return _response(redirects.CANARY_URL) if url == LOGIN_NEXT else _response()
+
+    mock_get = MagicMock(side_effect=fake_get)
+    result = _run(mock_get)
+    assert result["vulnerable"] == [LOGIN_NEXT]
+    assert result["complete"] is True
+    assert result["probes_skipped"] == 1
+    assert result["probes_sent"] == TOTAL_PROBES
+    assert mock_get.call_count == TOTAL_PROBES
+
+
+def test_check_open_redirect_garbled_location_does_not_crash() -> None:
+    """Location 'http://[oops' makes urljoin raise ValueError; each probe is skipped, none crash."""
+    mock_get = MagicMock(return_value=_response("http://[oops"))
+    result = _run(mock_get)
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == TOTAL_PROBES
+    assert result["complete"] is True
+    assert mock_get.call_count == TOTAL_PROBES
+
+
+def test_check_open_redirect_skips_probe_on_other_request_error() -> None:
+    """An odd error (InvalidURL) skips only that probe; the other 31 still run."""
+
+    def fake_get(url: str, **kwargs: object) -> MagicMock:
+        if url == LOGIN_NEXT:
+            raise requests.exceptions.InvalidURL("bad")
+        return _response()
+
+    mock_get = MagicMock(side_effect=fake_get)
+    result = _run(mock_get)
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 1
+    assert mock_get.call_count == TOTAL_PROBES
+
+
+def test_ssl_error_stops_at_once_with_tls_reason() -> None:
+    """A certificate failure won't go away by retrying: stop on the first SSLError."""
+    fake_get = _answers(_response("https://example.com/"), _response(),
+                        requests.exceptions.SSLError("certificate verify failed"))
+    result = _run(fake_get)
+    assert fake_get.call_count == 3
+    assert result["complete"] is False
+    assert result["stop_reason"] == "tls"
+    assert result["probes_sent"] == 2
+    assert result["probes_skipped"] == 0
+
+
+# --- Switching to https:// when plain HTTP redirects there or can't be reached ---
 
 
 def _upgrade_on_first_probe(location: str) -> MagicMock:
-    """Fake requests.get: only the very first HTTP probe redirects to `location`; all else is 200."""
+    """Fake get: only the very first HTTP probe redirects to `location`; all else is 200."""
 
     def fake_get(url: str, **kwargs: object) -> MagicMock:
         return _response(location) if url == FIRST_HTTP else _response()
 
     return MagicMock(side_effect=fake_get)
-
-
-def _run(fake_get: MagicMock, host: str = "example.com") -> redirects.RedirectResults:
-    with patch("redirects.requests.get", fake_get):
-        return redirects.check_open_redirect(host)
-
-
-def _urls(fake_get: MagicMock) -> list[str]:
-    return [call.args[0] for call in fake_get.call_args_list]
 
 
 def test_check_open_redirect_switches_to_https_on_upgrade_redirect() -> None:
@@ -314,6 +487,7 @@ def test_check_open_redirect_switches_to_https_on_upgrade_redirect() -> None:
     assert all(u.startswith("https://example.com/") for u in urls[1:])
     assert result["base_url"] == "https://example.com"
     assert result["switch_reason"] == "redirect"
+    assert result["http_probes_sent"] == 1
     assert result["complete"] is True
     assert result["probes_sent"] == TOTAL_PROBES
     assert result["vulnerable"] == []
@@ -344,6 +518,7 @@ def test_check_open_redirect_non_upgrade_location_does_not_switch(location: str)
     result = _run(fake_get)
     assert result["switch_reason"] is None
     assert result["base_url"] == "http://example.com"
+    assert result["http_probes_sent"] == 0
     assert fake_get.call_count == TOTAL_PROBES
 
 
@@ -357,11 +532,11 @@ def test_check_open_redirect_upgrade_to_other_host_never_contacts_it() -> None:
 
 
 def test_check_open_redirect_switches_when_http_unreachable() -> None:
-    """HTTP refuses the connection, HTTPS answers: all 32 probes run over HTTPS, reason no_http."""
+    """HTTP refuses twice, HTTPS answers: all 32 probes run over HTTPS, reason no_http."""
 
     def fake_get(url: str, **kwargs: object) -> MagicMock:
         if url.startswith("http://"):
-            raise requests.exceptions.ConnectionError("refused")
+            raise REFUSED
         return _response()
 
     mock_get = MagicMock(side_effect=fake_get)
@@ -370,11 +545,12 @@ def test_check_open_redirect_switches_when_http_unreachable() -> None:
     assert result["base_url"] == "https://example.com"
     assert result["complete"] is True
     assert result["probes_sent"] == TOTAL_PROBES
-    assert mock_get.call_count == TOTAL_PROBES + 1
+    assert result["http_probes_sent"] == 2
+    assert mock_get.call_count == TOTAL_PROBES + 2
 
 
 def test_check_open_redirect_https_ssl_error_after_switch_never_disables_verification() -> None:
-    """HTTPS fails with an SSLError after the switch: incomplete, and verify=False is never used."""
+    """HTTPS fails with an SSLError after the switch: incomplete (tls), and verify=False is never used."""
 
     def fake_get(url: str, **kwargs: object) -> MagicMock:
         if url.startswith("http://"):
@@ -383,14 +559,16 @@ def test_check_open_redirect_https_ssl_error_after_switch_never_disables_verific
 
     mock_get = MagicMock(side_effect=fake_get)
     result = _run(mock_get)
+    assert mock_get.call_count == 2
     assert result["complete"] is False
+    assert result["stop_reason"] == "tls"
     assert result["switch_reason"] == "redirect"
-    assert all(call.kwargs.get("verify", True) is not False for call in mock_get.call_args_list)
+    assert all(c.kwargs.get("verify", True) is not False for c in mock_get.call_args_list)
 
 
 def test_check_open_redirect_upgrade_on_later_probe_is_ignored() -> None:
-    """Only probe 1 can trigger the switch; an HTTPS upgrade on probe 2+ is neither a switch nor a finding."""
-    mock_get = MagicMock(side_effect=[_response()] + [_response("https://example.com/")] * (TOTAL_PROBES - 1))
+    """Probe 1 was answered, so it decided: an HTTPS upgrade on probe 2+ is neither a switch nor a finding."""
+    mock_get = _answers(_response(), *[_response("https://example.com/")] * (TOTAL_PROBES - 1))
     result = _run(mock_get)
     assert result["switch_reason"] is None
     assert result["vulnerable"] == []
@@ -421,9 +599,130 @@ def test_check_open_redirect_ipv6_switch_keeps_brackets() -> None:
 
     def fake_get(url: str, **kwargs: object) -> MagicMock:
         if url.startswith("http://"):
-            raise requests.exceptions.ConnectionError("refused")
+            raise REFUSED
         return _response()
 
     result = _run(MagicMock(side_effect=fake_get), host="::1")
     assert result["base_url"] == "https://[::1]"
     assert result["switch_reason"] == "no_http"
+
+
+# --- The first ANSWERED probe (within the first 4) decides the switch ----------
+
+SLOW = requests.exceptions.ReadTimeout("slow page")
+UPGRADE = "https://example.com/"
+
+
+def test_skipped_first_probe_lets_second_probe_decide_switch() -> None:
+    """Probe 1 times out, probe 2 redirects to HTTPS: switch, after 2 HTTP requests."""
+    fake_get = _answers(SLOW, _response(UPGRADE))
+    result = _run(fake_get)
+    assert result["switch_reason"] == "redirect"
+    assert result["http_probes_sent"] == 2
+    assert fake_get.call_count == TOTAL_PROBES + 2
+
+
+def test_upgrade_on_fourth_probe_after_three_skips_still_switches() -> None:
+    """Probes 1-3 get no usable answer; probe 4 (the last in the window) can still decide."""
+    fake_get = _answers(SLOW, SLOW, SLOW, _response(UPGRADE))
+    result = _run(fake_get)
+    assert result["switch_reason"] == "redirect"
+    assert result["http_probes_sent"] == 4
+
+
+def test_upgrade_after_switch_window_is_ignored() -> None:
+    """Probes 1-4 skipped: the window is over, so an upgrade on probe 5 doesn't switch."""
+    fake_get = _answers(SLOW, SLOW, SLOW, SLOW, _response(UPGRADE))
+    result = _run(fake_get)
+    assert result["switch_reason"] is None
+    assert result["base_url"] == "http://example.com"
+    assert fake_get.call_count == TOTAL_PROBES
+
+
+def test_one_refused_then_answered_does_not_switch() -> None:
+    """HTTP refuses once, then answers normally: no switch, that one probe is skipped."""
+    result = _run(_answers(REFUSED, _response()))
+    assert result["switch_reason"] is None
+    assert result["base_url"] == "http://example.com"
+    assert result["probes_skipped"] == 1
+    assert result["complete"] is True
+
+
+def test_skip_then_two_refusals_while_deciding_switches_no_http() -> None:
+    """Timeout, then refused twice in a row, all before any answer: HTTP is unreachable -> no_http."""
+    fake_get = _answers(SLOW, REFUSED, REFUSED)
+    result = _run(fake_get)
+    assert result["switch_reason"] == "no_http"
+    assert result["http_probes_sent"] == 3
+    assert result["base_url"] == "https://example.com"
+    assert fake_get.call_count == TOTAL_PROBES + 3
+
+
+def test_two_refusals_after_an_answer_do_not_switch() -> None:
+    """HTTP answered probe 1, so a later double refusal just stops the check (no switch)."""
+    fake_get = _answers(_response(), REFUSED, REFUSED)
+    result = _run(fake_get)
+    assert result["switch_reason"] is None
+    assert result["complete"] is False
+    assert fake_get.call_count == 3
+
+
+def test_most_http_requests_before_switch_is_switch_window() -> None:
+    """Worst case: 3 skips then an upgrade -> 4 HTTP + 32 HTTPS = 36 requests in total."""
+    fake_get = _answers(SLOW, SLOW, SLOW, _response(UPGRADE))
+    _run(fake_get)
+    assert fake_get.call_count == redirects.SWITCH_WINDOW + TOTAL_PROBES == 36
+
+
+# --- Off-site redirect on the first answered probe: recorded, never requested ---
+
+
+def test_offsite_redirect_on_first_probe_is_recorded_not_requested() -> None:
+    """Probe 1 redirects to https://www.example.com/: noted in offsite_redirect, www never requested."""
+    fake_get = _upgrade_on_first_probe("https://www.example.com/")
+    result = _run(fake_get)
+    assert result["offsite_redirect"] == "https://www.example.com/"
+    assert result["vulnerable"] == []
+    assert not any("www.example.com" in u for u in _urls(fake_get))
+
+
+def test_offsite_redirect_is_judged_like_a_browser() -> None:
+    """A protocol-relative //www.example.com is resolved against the probe URL."""
+    result = _run(_upgrade_on_first_probe("//www.example.com/home"))
+    assert result["offsite_redirect"] == "http://www.example.com/home"
+
+
+@pytest.mark.parametrize("location", [
+    redirects.CANARY_URL,        # a finding, not an off-site note
+    "/home",                     # same site
+    "http://example.com:8080/",  # same host, other port
+])
+def test_no_offsite_redirect_for_canary_or_same_host(location: str) -> None:
+    """The canary and the target host itself are never reported as 'another host'."""
+    assert _run(_upgrade_on_first_probe(location))["offsite_redirect"] is None
+
+
+def test_no_offsite_redirect_for_https_upgrade() -> None:
+    """The HTTPS upgrade is a switch, not an off-site redirect."""
+    assert _run(_upgrade_on_first_probe(UPGRADE))["offsite_redirect"] is None
+
+
+def test_offsite_redirect_on_later_probe_is_not_recorded() -> None:
+    """Only the first answered probe is looked at for an off-site redirect."""
+    result = _run(_answers(_response(), _response("https://www.example.com/")))
+    assert result["offsite_redirect"] is None
+
+
+def test_offsite_redirect_after_skipped_probe_is_recorded() -> None:
+    """Probe 1 skipped: probe 2 is the first answered one, so its off-site redirect is noted."""
+    result = _run(_answers(SLOW, _response("https://www.example.com/")))
+    assert result["offsite_redirect"] == "https://www.example.com/"
+
+
+def test_offsite_redirect_after_https_switch_is_recorded() -> None:
+    """After switching, the first HTTPS probe redirecting to www is noted (and never requested)."""
+    fake_get = _answers(_response(UPGRADE), _response("https://www.example.com/"))
+    result = _run(fake_get)
+    assert result["switch_reason"] == "redirect"
+    assert result["offsite_redirect"] == "https://www.example.com/"
+    assert not any("www.example.com" in u for u in _urls(fake_get))

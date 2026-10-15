@@ -416,8 +416,8 @@ def test_generate_report_incomplete_redirect_check_keeps_finding() -> None:
 def test_generate_report_skipped_redirect_probes_info_line() -> None:
     """Skipped probes get an [INFO] line with the count and the hedged 'no redirects' wording."""
     text = _report(redirect_results=_redirects(skipped=3))
-    assert ("[INFO] 3 of 32 probes got no usable answer (timeout or unreadable reply) "
-            "and were skipped\n") in text
+    assert ("[INFO] 3 of 32 probes got no usable answer (timeout, dropped connection or "
+            "unreadable reply) and were skipped\n") in text
     assert "No open redirects found in the 29 probes that got an answer.\n" in text
     assert "No open redirects found.\n" not in text
     assert "[WARNING] Check incomplete" not in text
@@ -465,6 +465,80 @@ def test_generate_report_switched_clean_run_still_says_no_redirects() -> None:
     section = _redirect_section(_report(redirect_results=_redirects(switch_reason="redirect")))
     assert section.endswith("No open redirects found.\n\n")
     assert section.index(REDIRECT_INFO) < section.index("No open redirects found.")
+
+
+def test_generate_report_switch_line_mentions_earlier_http_probe() -> None:
+    """One HTTP probe before the switch: the [INFO] line says so (singular)."""
+    r = {**_redirects(switch_reason="redirect"), "http_probes_sent": 1}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[INFO] http://example.com redirects to HTTPS; probes were sent to "
+            "https://example.com instead (plus 1 earlier probe over HTTP)\n") in section
+
+
+def test_generate_report_no_http_line_mentions_earlier_http_probes() -> None:
+    """Two failed HTTP probes before the switch: plural wording on the no_http line."""
+    r = {**_redirects(switch_reason="no_http"), "http_probes_sent": 2}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[INFO] http://example.com could not be reached; probes were sent to "
+            "https://example.com instead (plus 2 earlier probes over HTTP)\n") in section
+
+
+def test_generate_report_no_earlier_probe_suffix_without_switch() -> None:
+    """http_probes_sent 0 (no switch): no '(plus ...)' text anywhere."""
+    r = {**_redirects(), "http_probes_sent": 0}
+    assert "earlier probe" not in _redirect_section(_report(redirect_results=r))
+
+
+def test_generate_report_tls_stop_with_no_answers() -> None:
+    """stop_reason 'tls' on the first probe: TLS/certificate wording, not 'could not connect'."""
+    r = {**_redirects(sent=1, complete=False, switch_reason="redirect"), "stop_reason": "tls"}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[WARNING] Check incomplete: TLS/certificate problem with https://example.com; "
+            "no probes were answered\n") in section
+    assert "could not connect" not in section
+    assert "No open redirects found" not in section
+
+
+def test_generate_report_tls_stop_after_some_answers() -> None:
+    """stop_reason 'tls' at probe 6: says where it stopped and keeps the hedged clean line."""
+    r = {**_redirects(sent=6, complete=False), "stop_reason": "tls"}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[WARNING] Check incomplete: TLS/certificate problem with http://example.com "
+            "at probe 6 of 32; the rest were not sent\n") in section
+    assert "No open redirects found in the 5 probes that got an answer.\n" in section
+
+
+def test_generate_report_two_failures_with_no_answers_says_could_not_connect() -> None:
+    """Stopped after 2 failed connections (1 skipped + the stopping one): nothing was answered."""
+    r = {**_redirects(sent=2, skipped=1, complete=False), "stop_reason": "connection"}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[WARNING] Check incomplete: could not connect to http://example.com; "
+            "no probes were answered\n") in section
+    assert "[WARNING] No probe got a usable answer" in section
+
+
+def test_generate_report_offsite_redirect_info_line() -> None:
+    """An off-host redirect on the first probe gets an [INFO] line saying it was not tested."""
+    r = {**_redirects(), "offsite_redirect": "https://www.example.com/"}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[INFO] http://example.com redirects to another host (https://www.example.com/); "
+            "that host was not tested\n") in section
+
+
+def test_generate_report_offsite_redirect_is_cleaned() -> None:
+    """The off-host target comes from the server, so it can't inject lines or escape codes."""
+    r = {**_redirects(), "offsite_redirect": EVIL}
+    text = _report(redirect_results=r)
+    assert "evil" in text
+    assert not any(line.startswith("[OK] Fake") for line in text.splitlines())
+    assert "\x1b" not in text
+    assert "‮" not in text
+
+
+def test_generate_report_no_offsite_line_when_none() -> None:
+    """offsite_redirect None: no 'another host' line."""
+    r = {**_redirects(), "offsite_redirect": None}
+    assert "another host" not in _redirect_section(_report(redirect_results=r))
 
 
 def test_generate_report_ssl_refused_by_winerror_code() -> None:

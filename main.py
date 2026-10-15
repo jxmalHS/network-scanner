@@ -96,6 +96,8 @@ def run_scan(args: argparse.Namespace) -> None:
 
     print("[*] Checking for open redirects...")
     redirect_results = check_open_redirect(host)
+    if not redirect_results["complete"] or redirect_results["probes_skipped"] > 0:
+        print("[!] Redirect check incomplete — see the report for details")
 
     print("[*] Checking SSL/TLS certificate...")
     ssl_results = check_ssl(host)
