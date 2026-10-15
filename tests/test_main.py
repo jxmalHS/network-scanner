@@ -164,6 +164,17 @@ def test_main_prints_cleaned_banner_on_one_line(
     assert "[+] Port 80 open — A | B\n" in capsys.readouterr().out
 
 
+def test_main_prints_non_printable_reply_and_no_banner(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Banner "" prints "(non-printable reply)"; banner None prints "no banner"."""
+    checks["scan_ports"].return_value = [{"port": 80, "banner": ""}, {"port": 81, "banner": None}]
+    _run(monkeypatch, "localhost")
+    out = capsys.readouterr().out
+    assert "[+] Port 80 open — (non-printable reply)\n" in out
+    assert "[+] Port 81 open — no banner\n" in out
+
+
 def test_main_prints_security_headers_progress(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
 ) -> None:

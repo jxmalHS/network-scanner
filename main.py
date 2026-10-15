@@ -86,6 +86,8 @@ def run_scan(args: argparse.Namespace) -> None:
     for entry in open_ports:
         if entry["banner"]:
             print(f"[+] Port {entry['port']} open — {entry['banner'][:50]}")
+        elif entry["banner"] == "":
+            print(f"[+] Port {entry['port']} open — (non-printable reply)")
         else:
             print(f"[+] Port {entry['port']} open — no banner")
 

@@ -39,7 +39,9 @@ def scan_port(host, port, family=socket.AF_INET):
                 sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
                 # clean_text: the banner comes from a possibly hostile server; make it one
                 # printable line so it can't fake report lines or send terminal escape codes.
-                banner = clean_text(sock.recv(1024).decode("utf-8", errors="ignore"))
+                # None = nothing received; "" = bytes arrived but none were printable.
+                data = sock.recv(1024)
+                banner = clean_text(data.decode("utf-8", errors="ignore")) if data else None
             except OSError:
                 pass
     return result == 0, banner

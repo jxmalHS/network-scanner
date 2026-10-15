@@ -48,7 +48,7 @@ def test_scan_port_hostile_banner_is_single_line_without_escape() -> None:
 
 
 def test_scan_port_banner_of_only_control_bytes_is_empty() -> None:
-    """A banner made only of control bytes cleans to '' (main.py then shows 'no banner')."""
+    """A banner made only of control bytes cleans to '' (shown as "(non-printable reply)")."""
     sock = _fake_socket(0, b"\x1b\x00")
     with patch("scanner.socket.socket", return_value=sock):
         assert scanner.scan_port("127.0.0.1", 80) == (True, "")
@@ -100,9 +100,16 @@ def test_scan_port_keyboard_interrupt_propagates() -> None:
             scanner.scan_port("127.0.0.1", 80)
 
 
-def test_scan_port_empty_reply_gives_empty_string_banner() -> None:
-    """A port that closes without sending data yields an empty-string banner."""
+def test_scan_port_empty_reply_gives_no_banner() -> None:
+    """A port that closes without sending anything gives None ("no banner"), not ""."""
     sock = _fake_socket(0, b"")
+    with patch("scanner.socket.socket", return_value=sock):
+        assert scanner.scan_port("127.0.0.1", 80) == (True, None)
+
+
+def test_scan_port_invalid_utf8_only_reply_is_non_printable() -> None:
+    """Bytes that aren't valid text at all give "" (something arrived, nothing printable)."""
+    sock = _fake_socket(0, b"\xff\xfe\xfd")
     with patch("scanner.socket.socket", return_value=sock):
         assert scanner.scan_port("127.0.0.1", 80) == (True, "")
 

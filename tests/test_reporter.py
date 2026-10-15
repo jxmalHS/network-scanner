@@ -138,9 +138,16 @@ def test_generate_report_open_port_without_banner() -> None:
     assert "[OPEN] Port 443 — no banner\n" in text
 
 
-def test_generate_report_empty_banner_counts_as_no_banner() -> None:
-    """An empty-string banner is also written as 'no banner'."""
+def test_generate_report_empty_banner_is_non_printable_reply() -> None:
+    """An empty-string banner means bytes arrived but none were printable."""
     text = _report(open_ports=[{"port": 443, "banner": ""}])
+    assert "[OPEN] Port 443 — (non-printable reply)\n" in text
+    assert "no banner" not in text
+
+
+def test_generate_report_none_banner_is_no_banner() -> None:
+    """A None banner means nothing was received: 'no banner'."""
+    text = _report(open_ports=[{"port": 443, "banner": None}])
     assert "[OPEN] Port 443 — no banner\n" in text
 
 

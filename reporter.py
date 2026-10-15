@@ -51,6 +51,8 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
             for entry in open_ports:
                 if entry["banner"]:
                     f.write(f"[OPEN] Port {entry['port']} — {entry['banner'][:100]}\n")
+                elif entry["banner"] == "":
+                    f.write(f"[OPEN] Port {entry['port']} — (non-printable reply)\n")
                 else:
                     f.write(f"[OPEN] Port {entry['port']} — no banner\n")
         else:
