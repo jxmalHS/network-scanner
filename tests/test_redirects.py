@@ -1213,3 +1213,36 @@ def test_stop_reading_ignores_an_already_closed_connection(error: type[Exception
     raw.shutdown.side_effect = error("already closed")
     redirects._stop_reading(raw)            # must not raise (no "Exception in thread" noise)
     raw.shutdown.assert_called_once()
+
+
+
+@pytest.mark.parametrize("content_type", ["text", "html", "text/ html", "none"])
+def test_invalid_content_type_is_sniffed_like_no_type(content_type: str) -> None:
+    """A Content-Type that isn't a valid type/subtype counts as none: the page is sniffed (browsers do)."""
+    page = _page(b"<html>" + _meta("0;url=http://redirect-canary.invalid/"), content_type=content_type)
+    assert _first_probe_flagged(page)["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+def test_last_valid_content_type_wins_when_headers_repeat() -> None:
+    """'text/html, application/json': browsers use the last valid type (JSON), so no meta refresh."""
+    page = _page(_meta("0;url=http://redirect-canary.invalid/"), content_type="text/html, application/json")
+    assert _first_probe_flagged(page)["vulnerable"] == []
+    page.raw.read1.assert_not_called()
+
+
+def test_xhtml_page_is_searched_for_meta_refresh() -> None:
+    """application/xhtml+xml is rendered as HTML by browsers, so its meta refresh counts."""
+    page = _page(_meta("0;url=http://redirect-canary.invalid/"), content_type="application/xhtml+xml")
+    assert _first_probe_flagged(page)["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+def test_304_not_modified_is_never_judged() -> None:
+    """A 304 shows no page, so even a Refresh header to the canary isn't a finding."""
+    page = _page(content_type=None, refresh="0;url=http://redirect-canary.invalid/", status=304)
+    assert _first_probe_flagged(page)["vulnerable"] == []
+
+
+def test_refresh_value_with_stray_control_character_still_judged() -> None:
+    """A vertical-tab before the URL is dropped like browsers' URL parser does: still flagged."""
+    page = _page(content_type=None, refresh="0;\x0bhttp://redirect-canary.invalid/")
+    assert _first_probe_flagged(page)["vulnerable_refresh_header"] == [FIRST_HTTP]

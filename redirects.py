@@ -26,7 +26,7 @@ SWITCH_WINDOW = 4        # the HTTPS switch is decided within the first 4 HTTP p
 FAILURES_TO_STOP = 2     # give up after this many failed connections in a row
 MAX_BODY_BYTES = 64 * 1024   # read at most 64 KB of a page when looking for <meta refresh>
 MAX_BODY_SECONDS = 5         # and spend at most 5 s reading it, however slowly it arrives
-NO_PAGE_STATUSES = (204, 205)   # "No Content" / "Reset Content": a browser shows no page at all
+NO_PAGE_STATUSES = (204, 205, 304)   # No Content / Reset Content / Not Modified: no page to show
 
 _now = time.monotonic        # (a module-level name tests can patch without touching the time module)
 
@@ -234,7 +234,7 @@ def _refresh_finding(test: str, response: requests.Response) -> Literal["header"
 
     Browsers show (and obey refreshes on) any answer that isn't a redirect, error pages
     included: 401, 403, 404, 500, a 3xx without Location, and a 300 even with Location.
-    Only 204 and 205 have no page to show, so they are never judged.
+    Only 204, 205 and 304 have no page to show, so they are never judged.
     Checks the Refresh header first (no body needed), then, for HTML pages only, a
     <meta http-equiv="refresh"> in the first MAX_BODY_BYTES. A page counts as HTML if its
     Content-Type says so, or if it has no usable type and its first bytes look like HTML
@@ -246,7 +246,7 @@ def _refresh_finding(test: str, response: requests.Response) -> Literal["header"
     if _points_to_canary(test, _refresh_url(response.headers.get("Refresh"))):
         return "header"
     content_type = response.headers.get("Content-Type", "")
-    if "html" in content_type.lower():
+    if _mime_essence(content_type) in HTML_TYPES:
         body = _read_capped(response)
     elif _browser_sniffs(response):
         body = _read_capped(response)
@@ -261,6 +261,7 @@ def _refresh_finding(test: str, response: requests.Response) -> Literal["header"
 
 # Content-Types that tell a browser nothing, so it guesses from the bytes (WHATWG MIME Sniffing).
 UNKNOWN_TYPES = {"", "unknown/unknown", "application/unknown", "*/*"}
+HTML_TYPES = {"text/html", "application/xhtml+xml"}   # types a browser renders as HTML
 SNIFF_BYTES = 1445                  # browsers only look at this much of the page to guess
 HTML_SIGNATURES = (                 # upper-cased; matched case-insensitively after leading whitespace,
                                     # and only when followed by a space or '>' (so not "<htmlx", "<abbr>")
@@ -279,8 +280,25 @@ def _browser_sniffs(response: requests.Response) -> bool:
     first_option = response.headers.get("X-Content-Type-Options", "").split(",", 1)[0]
     if first_option.strip(ASCII_WHITESPACE).lower() == "nosniff":
         return False
-    essence = response.headers.get("Content-Type", "").split(";", 1)[0]
-    return essence.strip(ASCII_WHITESPACE).lower() in UNKNOWN_TYPES
+    return _mime_essence(response.headers.get("Content-Type", "")) in UNKNOWN_TYPES
+
+
+_MIME_TOKEN = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+
+
+def _mime_essence(content_type: str) -> str:
+    """The "type/subtype" a browser would take from a Content-Type header, lower-case.
+
+    Like a browser's "extract a MIME type": repeated headers arrive joined by commas and
+    the last valid one wins; a value that isn't a valid type/subtype (e.g. "text", "html",
+    "text/ html") counts as no type at all, which gives "" (and the page gets sniffed).
+    """
+    essence = ""
+    for part in content_type.split(","):
+        candidate = part.split(";", 1)[0].strip(ASCII_WHITESPACE)
+        if re.fullmatch(f"{_MIME_TOKEN}/{_MIME_TOKEN}", candidate):
+            essence = candidate.lower()
+    return essence
 
 
 def _sniffs_as_html(body: bytes) -> bool:
