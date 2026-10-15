@@ -222,12 +222,27 @@ def test_check_ssl_connects_to_port_443_with_sni() -> None:
 
 
 def test_check_ssl_connection_refused_returns_error() -> None:
-    """A refused connection on 443 becomes an {'error': ...} dict."""
+    """A refused connection on 443 becomes an error dict tagged error_kind 'refused'."""
     err = ConnectionRefusedError(10061, "No connection could be made")
     with patch("ssl_checker.socket.create_connection", side_effect=err):
         result = ssl_checker.check_ssl("example.com")
-    assert set(result) == {"error"}
+    assert set(result) == {"error", "error_kind"}
+    assert result["error_kind"] == "refused"
     assert "10061" in result["error"]
+
+
+@pytest.mark.parametrize("err", [
+    TimeoutError("timed out"),
+    ConnectionResetError("connection refused by peer"),   # says "refused" but isn't a refusal
+    OSError("Connection refused"),                         # plain OSError: text alone doesn't count
+    ssl.SSLError(1, "wrong version number"),
+])
+def test_check_ssl_other_errors_have_no_error_kind(err: Exception) -> None:
+    """Only a real ConnectionRefusedError gets error_kind; other failures (even saying 'refused') don't."""
+    with patch("ssl_checker.socket.create_connection", side_effect=err):
+        result = ssl_checker.check_ssl("example.com")
+    assert "error" in result
+    assert "error_kind" not in result
 
 
 def test_check_ssl_timeout_returns_error() -> None:

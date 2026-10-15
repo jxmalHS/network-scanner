@@ -105,4 +105,8 @@ def check_ssl(host):
         # The target's fault: refused, timed out, DNS failure, connection reset, any TLS
         # failure (ssl.SSLError is an OSError), or a hostname the IDNA encoder rejects.
         # Anything else is a bug in this code and should crash loudly, not hide in the report.
-        return {"error": str(e)}
+        result = {"error": str(e)}
+        if isinstance(e, ConnectionRefusedError):
+            # One word the reporter can trust, instead of searching the OS's error text.
+            result["error_kind"] = "refused"
+        return result

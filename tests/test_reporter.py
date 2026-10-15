@@ -570,16 +570,21 @@ def test_generate_report_vulnerable_line_is_cleaned() -> None:
     assert "\u202e" not in text
 
 
-def test_generate_report_ssl_refused_by_winerror_code() -> None:
-    """An SSL error containing WinError 10061 is reported as port 443 closed."""
-    text = _report(ssl_results={"error": "[WinError 10061] No connection could be made"})
+def test_generate_report_ssl_refused_by_error_kind() -> None:
+    """error_kind 'refused' is reported as port 443 closed, not as a generic SSL error."""
+    text = _report(ssl_results={"error": "[WinError 10061] No connection could be made",
+                                "error_kind": "refused"})
     assert "[CRITICAL] Port 443 is closed — HTTPS is not enabled on this server\n" in text
+    assert "Error checking SSL" not in text
 
 
-def test_generate_report_ssl_refused_by_message() -> None:
-    """An SSL error mentioning 'refused' (any case) is reported as port 443 closed."""
-    text = _report(ssl_results={"error": "Connection Refused"})
-    assert "[CRITICAL] Port 443 is closed" in text
+@pytest.mark.parametrize("error", ["[WinError 10061] No connection could be made",
+                                   "Connection Refused", "peer refused the handshake"])
+def test_generate_report_ssl_refused_text_alone_is_not_port_closed(error: str) -> None:
+    """Without error_kind, text mentioning 10061/'refused' is shown as an ordinary SSL error."""
+    text = _report(ssl_results={"error": error})
+    assert "Port 443 is closed" not in text
+    assert f"Error checking SSL: {error}\n" in text
 
 
 def test_generate_report_ssl_other_error() -> None:
@@ -610,10 +615,11 @@ def test_generate_report_server_text_cannot_inject_lines_or_escapes(kwargs: dict
     assert "\u202e" not in text
 
 
-def test_generate_report_ssl_10061_still_reports_port_closed() -> None:
-    """The port-443-closed check reads the raw error, so cleaning doesn't break it."""
-    text = _report(ssl_results={"error": "[WinError 10061]\nrefused\x1b[0m"})
+def test_generate_report_ssl_refused_kind_ignores_messy_error_text() -> None:
+    """The port-443-closed line depends only on error_kind, whatever the error text contains."""
+    text = _report(ssl_results={"error": "[WinError 10061]\nrefused\x1b[0m", "error_kind": "refused"})
     assert "[CRITICAL] Port 443 is closed — HTTPS is not enabled on this server\n" in text
+    assert "\x1b" not in text
 
 
 def test_generate_report_valid_ssl_cert() -> None:

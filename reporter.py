@@ -150,7 +150,7 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
             f.write(f"[CRITICAL] Certificate rejected: {reason}\n")
             f.write(f"Details: {clean_text(ssl_results.get('error', 'no details'))}\n")
         elif "error" in ssl_results:
-            if "10061" in str(ssl_results['error']) or "refused" in str(ssl_results['error']).lower():
+            if ssl_results.get("error_kind") == "refused":
                 f.write("[CRITICAL] Port 443 is closed — HTTPS is not enabled on this server\n")
             else:
                 f.write(f"Error checking SSL: {clean_text(ssl_results['error'])}\n")
