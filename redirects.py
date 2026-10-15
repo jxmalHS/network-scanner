@@ -25,6 +25,7 @@ SWITCH_WINDOW = 4        # the HTTPS switch is decided within the first 4 HTTP p
 FAILURES_TO_STOP = 2     # give up after this many failed connections in a row
 MAX_BODY_BYTES = 64 * 1024   # read at most 64 KB of a page when looking for <meta refresh>
 MAX_BODY_SECONDS = 5         # and spend at most 5 s reading it, however slowly it arrives
+NO_PAGE_STATUSES = (204, 205)   # "No Content" / "Reset Content": a browser shows no page at all
 
 _now = time.monotonic        # (a module-level name tests can patch without touching the time module)
 
@@ -142,13 +143,16 @@ def _new_session() -> requests.Session:
 
 
 def _refresh_finding(test: str, response: requests.Response) -> Literal["header", "meta"] | None:
-    """How a 200 page without a redirect still sends browsers to the canary, if it does.
+    """How a page without a redirect still sends browsers to the canary, if it does.
 
+    Browsers show (and obey refreshes on) any answer that isn't a redirect, error pages
+    included: 401, 403, 404, 500, a 3xx without Location, and a 300 even with Location.
+    Only 204 and 205 have no page to show, so they are never judged.
     Checks the Refresh header first (no body needed), then, for HTML pages only, a
     <meta http-equiv="refresh"> in the first MAX_BODY_BYTES. JavaScript redirects are not
     detected: that would need running the page's scripts.
     """
-    if response.status_code != 200:
+    if response.status_code in NO_PAGE_STATUSES:
         return None
     if _points_to_canary(test, _refresh_url(response.headers.get("Refresh"))):
         return "header"
@@ -207,6 +211,9 @@ def _probe_all(
             try:
                 with session.get(test, timeout=PROBE_TIMEOUT, allow_redirects=False,
                                  stream=True) as response:
+                    # is_redirect is True only for 301/302/303/307/308 with a Location: the
+                    # statuses browsers follow (Fetch's "redirect statuses"). A 300 with a
+                    # Location, or any 3xx without one, is shown as a page, so its refresh is judged.
                     location = response.headers.get("Location") if response.is_redirect else None
                     refresh = _refresh_finding(test, response) if location is None else None
                 points_to_canary = (location is not None

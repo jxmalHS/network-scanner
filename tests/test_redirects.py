@@ -813,13 +813,70 @@ def test_meta_refresh_garbled_url_with_control_chars_does_not_crash() -> None:
 @pytest.mark.parametrize("response", [
     _page(_meta("0;url=http://redirect-canary.invalid/"), content_type="application/json"),
     _page(_meta("0;url=http://redirect-canary.invalid/"), content_type=None),
-    _page(_meta("0;url=http://redirect-canary.invalid/"), status=404),
 ])
-def test_body_not_read_unless_200_html(response: MagicMock) -> None:
-    """Non-HTML pages, pages without a Content-Type and non-200 answers are never read."""
+def test_body_not_read_unless_html(response: MagicMock) -> None:
+    """Non-HTML pages and pages without a Content-Type are never read."""
     result = _first_probe_flagged(response)
     assert result["vulnerable"] == []
     response.raw.read1.assert_not_called()
+
+
+CANARY_META = _meta("0;url=http://redirect-canary.invalid/")
+
+
+@pytest.mark.parametrize("status", [200, 300, 302, 401, 403, 404, 500])
+def test_meta_refresh_judged_on_any_page_a_browser_shows(status: int) -> None:
+    """Error pages and 3xx answers without a Location are shown by browsers, so they count."""
+    result = _first_probe_flagged(_page(CANARY_META, status=status))
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+def test_300_with_location_is_judged_as_a_page() -> None:
+    """300 Multiple Choices is not one of the statuses browsers follow, even with a Location."""
+    response = _page(CANARY_META, status=300, refresh="0;url=http://redirect-canary.invalid/")
+    response.headers["Location"] = "/home"
+    real = requests.Response()                      # what requests itself says about such a reply
+    real.status_code = 300
+    real.headers["Location"] = "/home"
+    response.is_redirect = real.is_redirect
+    assert response.is_redirect is False
+    result = _first_probe_flagged(response)
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert result["vulnerable_refresh_header"] == [FIRST_HTTP]
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_refresh_not_judged_on_a_real_redirect(status: int) -> None:
+    """301/302/303/307/308 with a Location: the browser follows it, so the refresh never matters."""
+    response = _page(CANARY_META, status=status, refresh="0;url=http://redirect-canary.invalid/")
+    response.headers["Location"] = "/home"
+    real = requests.Response()
+    real.status_code = status
+    real.headers["Location"] = "/home"
+    response.is_redirect = real.is_redirect
+    assert response.is_redirect is True
+    result = _first_probe_flagged(response)
+    assert result["vulnerable"] == []
+    response.raw.read1.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [204, 205])
+def test_no_content_answers_are_never_judged(status: int) -> None:
+    """204/205 have no page to show: neither the Refresh header nor the body is looked at."""
+    response = _page(CANARY_META, status=status, refresh="0;url=http://redirect-canary.invalid/")
+    result = _first_probe_flagged(response)
+    assert result["vulnerable"] == []
+    response.raw.read1.assert_not_called()
+
+
+def test_404_meta_page_on_every_probe_never_requests_the_canary() -> None:
+    """Error pages with a meta refresh are flagged, but still only 32 requests, all to example.com."""
+    fake_get = MagicMock(return_value=_page(CANARY_META, status=404))
+    result = _run(fake_get)
+    assert len(result["vulnerable_meta_refresh"]) == TOTAL_PROBES
+    assert fake_get.call_count == TOTAL_PROBES
+    assert all(host_of(u) == "example.com" for u in _urls(fake_get))
 
 
 def test_body_not_read_for_redirect_response() -> None:
@@ -904,10 +961,10 @@ def test_refresh_header_not_flagged(refresh: str) -> None:
     assert result["probes_skipped"] == 0
 
 
-def test_refresh_header_ignored_on_non_200() -> None:
-    """Refresh on a 404 page is not judged (same rule as the meta refresh)."""
+def test_refresh_header_judged_on_404() -> None:
+    """Refresh on a 404 page still sends browsers there (same rule as the meta refresh)."""
     response = _page(content_type=None, refresh="0;url=http://redirect-canary.invalid/", status=404)
-    assert _first_probe_flagged(response)["vulnerable"] == []
+    assert _first_probe_flagged(response)["vulnerable_refresh_header"] == [FIRST_HTTP]
 
 
 def test_meta_refresh_page_never_requests_the_canary() -> None:

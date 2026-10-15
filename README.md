@@ -70,9 +70,12 @@ python main.py scanme.nmap.org
   instead; this is decided by the first answered probe among the first 4.
 - One failed connection only skips that probe; the check stops after 2 failed connections in a
   row, or at once on a TLS/certificate problem.
-- A normal page (status 200, no redirect) can still redirect a browser. The check also looks at
-  a `Refresh:` response header and, for HTML pages only, a `<meta http-equiv="refresh">` tag in
+- A page that isn't a redirect can still redirect a browser. The check also looks at a
+  `Refresh:` response header and, for HTML pages only, a `<meta http-equiv="refresh">` tag in
   the first 64 KB of the page. Neither is ever followed.
+- This applies to any page a browser would show, error pages included (401, 403, 404, 500…),
+  a 3xx answer without a `Location`, and a 300 even with one. Only 301/302/303/307/308 with a
+  `Location` count as redirects, and 204/205 answers (no page at all) are never judged.
 - **JavaScript redirects are not detected.** Spotting them reliably would mean running the
   page's scripts like a browser does; just searching the page for the test address would flag
   every page that merely echoes the parameter back, giving false alarms.
