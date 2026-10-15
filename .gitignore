@@ -1,6 +1,5 @@
 venv/
-*.txt
 __pycache__/
 *.pyc
-!requirements.txt
+report_*.txt
 CLAUDE.md
