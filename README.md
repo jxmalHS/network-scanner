@@ -79,6 +79,12 @@ python main.py scanme.nmap.org
 - Refresh values are read with the same rules browsers use (so `0url=…` or a delay written in
   non-ASCII digits is ignored, as a browser would), and UTF-16 pages (marked by a byte order
   mark or a `charset=utf-16` in `Content-Type`) are decoded correctly.
+- A page counts as HTML if its `Content-Type` says so, or, when it has no usable type (missing,
+  empty or "unknown") and doesn't send `X-Content-Type-Options: nosniff`, if its first bytes
+  look like HTML the way a browser guesses. Any other stated type (JSON, images,
+  `application/octet-stream`…) is never read.
+- On sites with many error pages or untyped pages the check can take longer, since more pages
+  are read — still capped at 64 KB and 5 s per page and 36 requests in total.
 - **JavaScript redirects are not detected.** Spotting them reliably would mean running the
   page's scripts like a browser does; just searching the page for the test address would flag
   every page that merely echoes the parameter back, giving false alarms.

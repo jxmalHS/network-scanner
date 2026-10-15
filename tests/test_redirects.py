@@ -39,6 +39,7 @@ def _response(location: str | None = None) -> MagicMock:
     if location is not None:
         headers["Location"] = location
     response.headers = headers
+    response.raw.read1.return_value = b""     # an empty body (a page with no Content-Type is read)
     return response
 
 
@@ -810,18 +811,125 @@ def test_meta_refresh_garbled_url_with_control_chars_does_not_crash() -> None:
     assert result["vulnerable"] == [FIRST_HTTP]
 
 
-@pytest.mark.parametrize("response", [
-    _page(_meta("0;url=http://redirect-canary.invalid/"), content_type="application/json"),
-    _page(_meta("0;url=http://redirect-canary.invalid/"), content_type=None),
+CANARY_META = _meta("0;url=http://redirect-canary.invalid/")
+
+
+@pytest.mark.parametrize("content_type", [
+    "application/json", "text/plain", "image/png", "application/octet-stream",
+    "application/octet-stream; charset=utf-8", "text/css",
 ])
-def test_body_not_read_unless_html(response: MagicMock) -> None:
-    """Non-HTML pages and pages without a Content-Type are never read."""
+def test_body_not_read_for_a_stated_non_html_type(content_type: str) -> None:
+    """A page whose Content-Type names any non-HTML type is taken at its word and never read."""
+    response = _page(CANARY_META, content_type=content_type)
     result = _first_probe_flagged(response)
     assert result["vulnerable"] == []
     response.raw.read1.assert_not_called()
 
 
-CANARY_META = _meta("0;url=http://redirect-canary.invalid/")
+# --- Pages without a usable Content-Type: guessed from their first bytes, like a browser ---
+
+
+@pytest.mark.parametrize("content_type", [
+    None, "", "  ", "unknown/unknown", "application/unknown", "*/*", "UNKNOWN/UNKNOWN; x=1",
+])
+def test_untyped_html_page_is_sniffed_and_flagged(content_type: str | None) -> None:
+    """No Content-Type (or an 'unknown' one): a browser sniffs <html> and obeys the meta refresh."""
+    result = _first_probe_flagged(_page(CANARY_META, content_type=content_type))
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+@pytest.mark.parametrize("prefix", [
+    b"<!DOCTYPE html>",
+    b" \t\r\n\x0c<!doctype HTML>",
+    b"<p>hello</p>",
+    b"<!-- comment -->",
+    b"<HtMl>",
+    b"<head>",
+    b"<script>x=1</script>",
+    b"<b>bold</b>",
+])
+def test_sniffing_recognises_html_starts(prefix: bytes) -> None:
+    """The browser's HTML signatures, case-insensitive, after leading whitespace."""
+    body = prefix + b'<meta http-equiv="refresh" content="0;url=http://redirect-canary.invalid/">'
+    result = _first_probe_flagged(_page(body, content_type=None))
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+@pytest.mark.parametrize("body", [
+    b"<htmlx>" + CANARY_META,                     # tag name must end with a space or '>'
+    b"<abbr>" + CANARY_META,                      # <a must be followed by space or '>'
+    b"hello " + CANARY_META,                      # plain text first
+    b"\xef\xbb\xbf" + CANARY_META,                # a BOM is not whitespace: sniffed as text
+    b"\xff\xfe" + CANARY_META.decode().encode("utf-16-le"),
+    b" " * redirects.SNIFF_BYTES + CANARY_META,   # the HTML start is past what browsers look at
+    b"\xa0" + CANARY_META,                        # NBSP is not skipped as whitespace
+])
+def test_untyped_page_not_sniffed_as_html_is_not_flagged(body: bytes) -> None:
+    """Untyped pages a browser would show as text are not judged for a meta refresh."""
+    result = _first_probe_flagged(_page(body, content_type=None))
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+
+
+@pytest.mark.parametrize("option", ["nosniff", "NoSniff ", "nosniff, nosniff"])
+def test_nosniff_untyped_page_is_not_read(option: str) -> None:
+    """X-Content-Type-Options: nosniff forbids guessing, so an untyped page is never read."""
+    response = _page(CANARY_META, content_type=None)
+    response.headers["X-Content-Type-Options"] = option
+    result = _first_probe_flagged(response)
+    assert result["vulnerable"] == []
+    response.raw.read1.assert_not_called()
+
+
+def test_nosniff_does_not_stop_a_typed_html_page() -> None:
+    """nosniff only stops guessing; a page that says text/html is still read."""
+    response = _page(CANARY_META)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    assert _first_probe_flagged(response)["vulnerable_meta_refresh"] == [FIRST_HTTP]
+
+
+def test_octet_stream_page_with_meta_refresh_is_not_read() -> None:
+    """application/octet-stream is a stated type (a download), not 'unknown': never sniffed."""
+    response = _page(b"<html>" + CANARY_META, content_type="application/octet-stream")
+    result = _first_probe_flagged(response)
+    assert result["vulnerable"] == []
+    response.raw.read1.assert_not_called()
+
+
+def test_untyped_body_read_is_still_capped_at_64_kb() -> None:
+    """An endless page with no Content-Type: at most 64 KB is pulled, then it's closed."""
+    response = _page(content_type=None)
+    pulled: list[int] = []
+
+    def endless(amt: int = 8192, **kwargs: object) -> bytes:
+        pulled.append(amt)
+        return b"<html>" + b"a" * (amt - 6)
+
+    response.raw.read1.side_effect = endless
+    result = _first_probe_flagged(response)
+    assert 0 < sum(pulled) <= redirects.MAX_BODY_BYTES
+    assert result["vulnerable"] == []
+    assert response.__exit__.call_count == response.__enter__.call_count == 1
+
+
+def test_untyped_body_read_stops_at_the_time_limit() -> None:
+    """A slow-drip untyped page is cut off at MAX_BODY_SECONDS just like an HTML one."""
+    response = _page(content_type=None)
+    response.raw.read1.side_effect = lambda amt=8192, **kwargs: b"a"
+    clock = iter(range(0, 10_000, 2))
+    with patch("redirects._now", side_effect=lambda: next(clock)):
+        result = _first_probe_flagged(response)
+    assert response.raw.read1.call_count <= 3
+    assert result["probes_skipped"] == 0
+
+
+def test_untyped_meta_page_on_every_probe_never_requests_the_canary() -> None:
+    """Sniffed pages are flagged, but still only 32 requests, all to example.com."""
+    fake_get = MagicMock(return_value=_page(CANARY_META, content_type=None, status=404))
+    result = _run(fake_get)
+    assert len(result["vulnerable_meta_refresh"]) == TOTAL_PROBES
+    assert fake_get.call_count == TOTAL_PROBES
+    assert all(host_of(u) == "example.com" for u in _urls(fake_get))
 
 
 @pytest.mark.parametrize("status", [200, 300, 302, 401, 403, 404, 500])

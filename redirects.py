@@ -224,7 +224,9 @@ def _refresh_finding(test: str, response: requests.Response) -> Literal["header"
     included: 401, 403, 404, 500, a 3xx without Location, and a 300 even with Location.
     Only 204 and 205 have no page to show, so they are never judged.
     Checks the Refresh header first (no body needed), then, for HTML pages only, a
-    <meta http-equiv="refresh"> in the first MAX_BODY_BYTES. JavaScript redirects are not
+    <meta http-equiv="refresh"> in the first MAX_BODY_BYTES. A page counts as HTML if its
+    Content-Type says so, or if it has no usable type and its first bytes look like HTML
+    to a browser's sniffing (see _browser_sniffs). JavaScript redirects are not
     detected: that would need running the page's scripts.
     """
     if response.status_code in NO_PAGE_STATUSES:
@@ -232,11 +234,50 @@ def _refresh_finding(test: str, response: requests.Response) -> Literal["header"
     if _points_to_canary(test, _refresh_url(response.headers.get("Refresh"))):
         return "header"
     content_type = response.headers.get("Content-Type", "")
-    if "html" not in content_type.lower():
-        return None
-    if _points_to_canary(test, _meta_refresh_url(_read_capped(response), content_type)):
+    if "html" in content_type.lower():
+        body = _read_capped(response)
+    elif _browser_sniffs(response):
+        body = _read_capped(response)
+        if not _sniffs_as_html(body):
+            return None
+    else:
+        return None                     # a stated non-HTML type (JSON, image, octet-stream...)
+    if _points_to_canary(test, _meta_refresh_url(body, content_type)):
         return "meta"
     return None
+
+
+# Content-Types that tell a browser nothing, so it guesses from the bytes (WHATWG MIME Sniffing).
+UNKNOWN_TYPES = {"", "unknown/unknown", "application/unknown", "*/*"}
+SNIFF_BYTES = 1445                  # browsers only look at this much of the page to guess
+HTML_SIGNATURES = (                 # upper-cased; matched case-insensitively after leading whitespace,
+                                    # and only when followed by a space or '>' (so not "<htmlx", "<abbr>")
+    b"<!DOCTYPE HTML", b"<HTML", b"<HEAD", b"<SCRIPT", b"<IFRAME", b"<H1", b"<DIV", b"<FONT",
+    b"<TABLE", b"<A", b"<STYLE", b"<TITLE", b"<B", b"<BODY", b"<BR", b"<P", b"<!--",
+)
+
+
+def _browser_sniffs(response: requests.Response) -> bool:
+    """True if a browser would guess this page's type from its bytes.
+
+    Only when Content-Type is missing, empty or one of the "unknown" values, and the server
+    didn't forbid guessing with X-Content-Type-Options: nosniff. Any other type, even one the
+    scanner doesn't know (application/octet-stream, image/png...), is taken at its word.
+    """
+    first_option = response.headers.get("X-Content-Type-Options", "").split(",", 1)[0]
+    if first_option.strip(ASCII_WHITESPACE).lower() == "nosniff":
+        return False
+    essence = response.headers.get("Content-Type", "").split(";", 1)[0]
+    return essence.strip(ASCII_WHITESPACE).lower() in UNKNOWN_TYPES
+
+
+def _sniffs_as_html(body: bytes) -> bool:
+    """True if a browser's sniffing would call this page HTML (first SNIFF_BYTES only)."""
+    head = body[:SNIFF_BYTES].lstrip(ASCII_WHITESPACE.encode()).upper()
+    for signature in HTML_SIGNATURES:
+        if head.startswith(signature) and head[len(signature):len(signature) + 1] in (b" ", b">"):
+            return True
+    return False
 
 
 def _is_https_upgrade(test: str, location: str) -> bool:
