@@ -66,7 +66,7 @@ python main.py scanme.nmap.org
   every page that merely echoes the parameter back, giving false alarms.
 - **Worst case:** at most 36 requests (up to 4 over HTTP, then 32 over HTTPS), about 0.2 s
   apart — roughly 7 s plus network time (each probe waits at most 5 s for an answer), and up
-  to 64 KB read from each HTML page.
+  to 64 KB read from each HTML page, for at most 5 s more per page however slowly it arrives.
 - If the check could not finish, or some probes got no usable answer, the console prints
   `[!] Redirect check incomplete — see the report for details`.
 

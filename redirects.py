@@ -6,6 +6,7 @@ from typing import Literal, NotRequired, TypedDict
 from urllib.parse import urljoin, urlsplit
 
 import requests
+import urllib3
 
 from urltools import host_of, url_host
 
@@ -22,6 +23,7 @@ PROBE_DELAY = 0.2        # pause between probes (seconds), so the target is neve
 SWITCH_WINDOW = 4        # the HTTPS switch is decided within the first 4 HTTP probes
 FAILURES_TO_STOP = 2     # give up after this many failed connections in a row
 MAX_BODY_BYTES = 64 * 1024   # read at most 64 KB of a page when looking for <meta refresh>
+MAX_BODY_SECONDS = 5         # and spend at most 5 s reading it, however slowly it arrives
 
 
 def _browser_target(base: str, location: str) -> str:
@@ -83,14 +85,21 @@ def _refresh_url(content: str | None) -> str | None:
 
 
 def _read_capped(response: requests.Response) -> bytes:
-    """At most MAX_BODY_BYTES of the body; a body that breaks off halfway gives what arrived."""
+    """At most MAX_BODY_BYTES of the body, read for at most MAX_BODY_SECONDS in total.
+
+    read1 returns as soon as *some* bytes arrive, so a server that drips one byte every few
+    seconds can't keep a probe busy for hours (the 5 s timeout only limits each single wait).
+    A body that breaks off halfway gives what arrived.
+    """
     data = bytearray()
+    deadline = time.monotonic() + MAX_BODY_SECONDS
     try:
-        for chunk in response.iter_content(chunk_size=8192):
-            data += chunk
-            if len(data) >= MAX_BODY_BYTES:
+        while len(data) < MAX_BODY_BYTES and time.monotonic() < deadline:
+            chunk = response.raw.read1(8192, decode_content=True)
+            if not chunk:
                 break
-    except requests.exceptions.RequestException:
+            data += chunk
+    except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError):
         pass
     return bytes(data[:MAX_BODY_BYTES])
 

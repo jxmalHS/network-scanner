@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import pytest
 import requests
+import urllib3
 from requests.cookies import MockRequest, MockResponse
 from requests.structures import CaseInsensitiveDict
 
@@ -733,7 +734,7 @@ def test_offsite_redirect_after_https_switch_is_recorded() -> None:
 
 def _page(body: bytes = b"", content_type: str | None = "text/html; charset=utf-8",
           refresh: str | None = None, status: int = 200) -> MagicMock:
-    """Fake non-redirect response with a body that iter_content hands out in chunks."""
+    """Fake non-redirect response whose body raw.read1 hands out in chunks."""
     response = _response()
     response.status_code = status
     if content_type is not None:
@@ -741,10 +742,15 @@ def _page(body: bytes = b"", content_type: str | None = "text/html; charset=utf-
     if refresh is not None:
         response.headers["Refresh"] = refresh
 
-    def iter_content(chunk_size: int = 1, **kwargs: object) -> Iterator[bytes]:
-        return iter([body[i:i + chunk_size] for i in range(0, len(body), chunk_size)])
+    pieces = [body[i:i + 8192] for i in range(0, len(body), 8192)]
+    state = {"chunks": iter(pieces)}
 
-    response.iter_content.side_effect = iter_content
+    def enter() -> MagicMock:             # every probe that opens this response reads it from the start
+        state["chunks"] = iter(pieces)
+        return response
+
+    response.__enter__.side_effect = enter
+    response.raw.read1.side_effect = lambda amt=8192, **kwargs: next(state["chunks"], b"")
     return response
 
 
@@ -798,7 +804,7 @@ def test_meta_refresh_not_flagged(body: bytes) -> None:
 
 def test_meta_refresh_garbled_url_with_control_chars_does_not_crash() -> None:
     """A hostile refresh URL full of escape codes is judged safely (host is the canary: flagged)."""
-    body = _meta("0;url=http://redirect-canary.invalid/\x1b[2J‮\n[OK] fake")
+    body = _meta("0;url=http://redirect-canary.invalid/\x1b[2J\u202e\n[OK] fake")
     result = _first_probe_flagged(_page(body))
     assert result["vulnerable"] == [FIRST_HTTP]
 
@@ -812,7 +818,7 @@ def test_body_not_read_unless_200_html(response: MagicMock) -> None:
     """Non-HTML pages, pages without a Content-Type and non-200 answers are never read."""
     result = _first_probe_flagged(response)
     assert result["vulnerable"] == []
-    response.iter_content.assert_not_called()
+    response.raw.read1.assert_not_called()
 
 
 def test_body_not_read_for_redirect_response() -> None:
@@ -820,7 +826,7 @@ def test_body_not_read_for_redirect_response() -> None:
     response = _response("/home")
     response.headers["Content-Type"] = "text/html"
     _first_probe_flagged(response)
-    response.iter_content.assert_not_called()
+    response.raw.read1.assert_not_called()
 
 
 def test_body_read_is_capped_at_64_kb_and_response_closed() -> None:
@@ -828,12 +834,11 @@ def test_body_read_is_capped_at_64_kb_and_response_closed() -> None:
     response = _page()
     pulled: list[int] = []
 
-    def endless(chunk_size: int = 1, **kwargs: object) -> Iterator[bytes]:
-        while True:
-            pulled.append(chunk_size)
-            yield b"a" * chunk_size
+    def endless(amt: int = 8192, **kwargs: object) -> bytes:
+        pulled.append(amt)
+        return b"a" * amt
 
-    response.iter_content.side_effect = endless
+    response.raw.read1.side_effect = endless
     result = _first_probe_flagged(response)
     assert sum(pulled) <= redirects.MAX_BODY_BYTES
     assert redirects.MAX_BODY_BYTES == 64 * 1024
@@ -853,11 +858,10 @@ def test_body_that_breaks_off_uses_what_arrived() -> None:
     """The connection drops after the meta tag: the finding still counts, and nothing is skipped."""
     response = _page()
 
-    def broken(chunk_size: int = 1, **kwargs: object) -> Iterator[bytes]:
-        yield _meta("0;url=http://redirect-canary.invalid/")
-        raise requests.exceptions.ChunkedEncodingError("connection broken")
-
-    response.iter_content.side_effect = broken
+    response.raw.read1.side_effect = [
+        _meta("0;url=http://redirect-canary.invalid/"),
+        urllib3.exceptions.ProtocolError("connection broken"),
+    ]
     result = _first_probe_flagged(response)
     assert result["vulnerable"] == [FIRST_HTTP]
     assert result["probes_skipped"] == 0
@@ -883,7 +887,7 @@ def test_refresh_header_to_canary_is_flagged_without_reading_body(refresh: str) 
     assert result["vulnerable"] == [FIRST_HTTP]
     assert result["vulnerable_refresh_header"] == [FIRST_HTTP]
     assert result["vulnerable_meta_refresh"] == []
-    response.iter_content.assert_not_called()
+    response.raw.read1.assert_not_called()
 
 
 @pytest.mark.parametrize("refresh", [
@@ -926,3 +930,15 @@ def test_meta_refresh_page_never_requests_the_canary() -> None:
 def test_refresh_url_parsing(content: str | None, expected: str | None) -> None:
     """_refresh_url pulls the URL out of a refresh value the way browsers roughly do."""
     assert redirects._refresh_url(content) == expected
+
+
+def test_body_read_stops_at_the_time_limit_for_a_slow_drip_server() -> None:
+    """A server dripping 1 byte per read can't hold a probe for long: reading stops at MAX_BODY_SECONDS."""
+    response = _page()
+    response.raw.read1.side_effect = lambda amt=8192, **kwargs: b"a"
+    clock = iter(range(0, 10_000, 2))          # each look at the clock is 2 s later
+    with patch("redirects.time.monotonic", side_effect=lambda: next(clock)):
+        result = _first_probe_flagged(response)
+    assert redirects.MAX_BODY_SECONDS == 5
+    assert response.raw.read1.call_count <= 3  # deadline 5 s: stops after a couple of reads
+    assert result["probes_skipped"] == 0

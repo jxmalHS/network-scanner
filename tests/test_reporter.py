@@ -532,7 +532,7 @@ def test_generate_report_offsite_redirect_is_cleaned() -> None:
     assert "evil" in text
     assert not any(line.startswith("[OK] Fake") for line in text.splitlines())
     assert "\x1b" not in text
-    assert "‮" not in text
+    assert "\u202e" not in text
 
 
 def test_generate_report_no_offsite_line_when_none() -> None:
@@ -567,7 +567,7 @@ def test_generate_report_vulnerable_line_is_cleaned() -> None:
     assert "evil" in text
     assert not any(line.startswith("[OK] Fake") for line in text.splitlines())
     assert "\x1b" not in text
-    assert "‮" not in text
+    assert "\u202e" not in text
 
 
 def test_generate_report_ssl_refused_by_winerror_code() -> None:
