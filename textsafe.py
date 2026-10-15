@@ -2,15 +2,24 @@ import unicodedata
 
 SEPARATOR = " | "
 
-# Real scripts stack at most ~3 combining marks on one letter (Vietnamese 2, Devanagari ~2,
-# pointed Hebrew 3); "Zalgo" text stacks dozens to smear over neighbouring lines.
+# Most real text puts at most ~3 combining marks on one letter (Vietnamese 2, pointed
+# Hebrew 3). 4 is a trade-off: rare longer legitimate stacks get trimmed, while "Zalgo"
+# text (dozens of stacked marks that smear over neighbouring lines) is cut right down.
 MAX_MARKS_IN_A_ROW = 4
+
+# Invisible Hangul "filler" letters: they look like nothing, so they must not end a run of
+# marks (otherwise "4 marks + filler + 4 marks + ..." rebuilds a Zalgo stack). They are kept,
+# because U+1160 also appears in real old-style Korean text.
+_FILLERS = frozenset("ᅟᅠㅤﾠ")
 
 
 def _cap_marks(line: str) -> str:
     """Drop combining marks (accents etc.) beyond MAX_MARKS_IN_A_ROW in a row."""
     out, run = [], 0
     for ch in line:
+        if ch in _FILLERS:              # transparent: keep it, don't reset the count
+            out.append(ch)
+            continue
         run = run + 1 if unicodedata.category(ch).startswith("M") else 0
         if run <= MAX_MARKS_IN_A_ROW:
             out.append(ch)

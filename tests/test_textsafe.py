@@ -111,3 +111,21 @@ def test_clean_text_separate_mark_runs_are_each_kept() -> None:
 def test_clean_text_real_scripts_are_unchanged(text: str) -> None:
     """Normal accented text in real languages stays exactly the same."""
     assert clean_text(text) == text
+
+
+@pytest.mark.parametrize("filler", ["ᅟ", "ᅠ", "ㅤ", "ﾠ"])
+def test_clean_text_filler_letters_do_not_reset_the_mark_cap(filler: str) -> None:
+    """An invisible filler between two 3-mark runs doesn't buy extra marks: 4 in total survive."""
+    text = "a" + "́" * 3 + filler + "́" * 3
+    assert clean_text(text) == "a" + "́" * 3 + filler + "́"
+
+
+def test_clean_text_old_style_korean_with_filler_is_unchanged() -> None:
+    """Real old-style Korean jamo using U+1160 (jungseong filler) comes through untouched."""
+    text = "ᄀᅠᆨ 한"
+    assert clean_text(text) == text
+
+
+def test_clean_text_fillers_without_marks_are_unchanged() -> None:
+    """Fillers on their own (no accent marks around them) are kept as they are."""
+    assert clean_text("xㅤyﾠz") == "xㅤyﾠz"
