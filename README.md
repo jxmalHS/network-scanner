@@ -41,6 +41,18 @@ Check more ports at the same time (default 20, max 200). Keep this low on hosts 
 python main.py <host> --workers 50
 ```
 
+For a slower, gentler scan, use fewer workers (only ever on hosts you're allowed to scan):
+
+```powershell
+python main.py scanme.nmap.org --workers 2
+```
+
+**IPv4 vs IPv6:** when a host name has both an IPv4 and an IPv6 address, the scanner checks the
+IPv4 one (the report shows which, e.g. `Target: localhost (127.0.0.1)`). To check the IPv6
+address instead, pass it directly, e.g. `python main.py ::1`. The certificate's name check will
+then report a mismatch, because certificates are issued for names, not raw addresses.
+Link-local IPv6 addresses (`fe80::...`) aren't supported.
+
 ## Example
 
 ```powershell
