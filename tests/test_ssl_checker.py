@@ -1,4 +1,6 @@
 """Tests for ssl_checker.py - certificate inspection (socket + ssl fully mocked)."""
+import locale
+import socket
 import ssl
 import warnings
 from collections.abc import Iterator
@@ -303,3 +305,111 @@ def test_check_ssl_prefers_short_verify_message() -> None:
     ):
         result = ssl_checker.check_ssl("example.com")
     assert result["error"] == "self-signed certificate"
+
+
+# --- Someday #17: expiry dates are parsed without fromtimestamp / locale problems ---
+
+
+def test_check_ssl_handles_never_expires_date_9999() -> None:
+    """The 'never expires' date 9999-12-31 parses (fromtimestamp rejects it on Windows)."""
+    with _serve_cert(_cert(notAfter="Dec 31 23:59:59 9999 GMT")):
+        result = ssl_checker.check_ssl("example.com")
+    assert "error" not in result
+    assert result["expire_date"] == "9999-12-31"
+
+
+def test_check_ssl_parses_space_padded_day() -> None:
+    """OpenSSL pads single-digit days with a space ('Jan  5'); that still parses."""
+    with _serve_cert(_cert(notAfter="Jan  5 12:00:00 2031 GMT")):
+        assert ssl_checker.check_ssl("example.com")["expire_date"] == "2031-01-05"
+
+
+def test_check_ssl_parses_expiry_under_non_english_locale() -> None:
+    """English month names in notAfter still parse when the computer's LC_TIME is German."""
+    old = locale.setlocale(locale.LC_TIME)
+    try:
+        for name in ("German", "de_DE.UTF-8"):
+            try:
+                locale.setlocale(locale.LC_TIME, name)
+                break
+            except locale.Error:
+                continue
+        else:
+            pytest.skip("no German locale installed")
+        with _serve_cert(_cert(notAfter="Mar 15 12:00:00 2031 GMT")):
+            result = ssl_checker.check_ssl("example.com")
+    finally:
+        locale.setlocale(locale.LC_TIME, old)
+    assert "error" not in result
+    assert result["expire_date"] == "2031-03-15"
+
+
+# --- Someday #18: only target-caused errors are caught; bugs propagate ---
+
+
+def _patched_connect(**wrap_kwargs: Any):
+    """Patch create_default_context only (callers patch create_connection); wrap_kwargs configure wrap_socket."""
+    context = MagicMock()
+    context.wrap_socket.configure_mock(**wrap_kwargs)
+    return patch("ssl_checker.ssl.create_default_context", return_value=context)
+
+
+def test_check_ssl_plain_ssl_error_returns_error_without_cert_problem() -> None:
+    """A non-certificate TLS failure (plain ssl.SSLError) is an error but has no cert_problem."""
+    with _patched_connect(side_effect=ssl.SSLError(1, "wrong version number")), patch(
+        "ssl_checker.socket.create_connection"
+    ):
+        result = ssl_checker.check_ssl("example.com")
+    assert set(result) == {"error"}
+    assert "wrong version number" in result["error"]
+
+
+def test_check_ssl_dns_failure_returns_error() -> None:
+    """A DNS lookup failure (socket.gaierror) becomes an {'error': ...} dict."""
+    err = socket.gaierror(11001, "getaddrinfo failed")
+    with patch("ssl_checker.socket.create_connection", side_effect=err):
+        result = ssl_checker.check_ssl("nope.invalid")
+    assert set(result) == {"error"}
+    assert "getaddrinfo failed" in result["error"]
+
+
+def test_check_ssl_connection_reset_returns_error() -> None:
+    """A connection reset by the target becomes an {'error': ...} dict."""
+    with patch("ssl_checker.socket.create_connection", side_effect=ConnectionResetError("reset by peer")):
+        assert ssl_checker.check_ssl("example.com") == {"error": "reset by peer"}
+
+
+def test_check_ssl_bad_idna_hostname_returns_error() -> None:
+    """A hostname the IDNA encoder rejects (UnicodeError) becomes an {'error': ...} dict."""
+    err = UnicodeError("label empty or too long")
+    with patch("ssl_checker.socket.create_connection", side_effect=err):
+        assert ssl_checker.check_ssl("a..example.com") == {"error": "label empty or too long"}
+
+
+def test_check_ssl_unreadable_expiry_returns_error() -> None:
+    """A notAfter that isn't a date gives a clear error naming the bad value."""
+    with _serve_cert(_cert(notAfter="garbage")):
+        result = ssl_checker.check_ssl("example.com")
+    assert result == {"error": "unreadable certificate expiry date: garbage"}
+
+
+def test_check_ssl_missing_not_after_propagates_key_error() -> None:
+    """A cert dict without notAfter is a bug, not a target problem, so KeyError escapes."""
+    cert = _cert()
+    del cert["notAfter"]
+    with _serve_cert(cert), pytest.raises(KeyError):
+        ssl_checker.check_ssl("example.com")
+
+
+def test_check_ssl_internal_runtime_error_propagates() -> None:
+    """A bug inside the checker (RuntimeError) crashes loudly instead of hiding in the report."""
+    with _serve_cert(_cert()), patch("ssl_checker._domain_matches", side_effect=RuntimeError("bug")):
+        with pytest.raises(RuntimeError, match="bug"):
+            ssl_checker.check_ssl("example.com")
+
+
+def test_check_ssl_value_error_outside_date_parsing_propagates() -> None:
+    """The ValueError catch only wraps date parsing; a ValueError elsewhere still escapes."""
+    with _serve_cert(_cert()), patch("ssl_checker._domain_matches", side_effect=ValueError("bug")):
+        with pytest.raises(ValueError, match="bug"):
+            ssl_checker.check_ssl("example.com")

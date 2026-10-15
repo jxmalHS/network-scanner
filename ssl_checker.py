@@ -1,7 +1,9 @@
 import ipaddress
 import ssl
 import socket
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _name_matches(pattern: str, host: str) -> bool:
@@ -72,9 +74,13 @@ def check_ssl(host):
                 issuer = dict(x[0] for x in cert["issuer"])
                 issued_by = issuer.get("organizationName", "Unknown")
 
-                expire_date = datetime.strptime(
-                    cert["notAfter"], "%b %d %H:%M:%S %Y %Z"
-                ).replace(tzinfo=timezone.utc)
+                # cert_time_to_seconds reads OpenSSL's date format whatever the computer's
+                # language. Adding to 1970-01-01 (not fromtimestamp) also works for the
+                # "never expires" date 9999-12-31, which fromtimestamp rejects on Windows.
+                try:
+                    expire_date = _EPOCH + timedelta(seconds=ssl.cert_time_to_seconds(cert["notAfter"]))
+                except ValueError:
+                    return {"error": f"unreadable certificate expiry date: {cert['notAfter']}"}
                 days_remaining = (expire_date - datetime.now(timezone.utc)).days
 
                 expired = days_remaining < 0
@@ -95,5 +101,8 @@ def check_ssl(host):
         # verify_message is OpenSSL's short reason; hand-built errors don't have it.
         return {"error": getattr(e, "verify_message", None) or str(e),
                 "cert_problem": _cert_problem(e)}
-    except Exception as e:
+    except (OSError, UnicodeError) as e:
+        # The target's fault: refused, timed out, DNS failure, connection reset, any TLS
+        # failure (ssl.SSLError is an OSError), or a hostname the IDNA encoder rejects.
+        # Anything else is a bug in this code and should crash loudly, not hide in the report.
         return {"error": str(e)}
