@@ -1455,3 +1455,89 @@ def test_noscript_content_is_plain_text(inner: str, fallback: bool, request: pyt
     if fallback:
         request.getfixturevalue("parser_without_scripting")
     assert redirects._meta_refresh_url(_html(inner)) == "http://redirect-canary.invalid/"
+
+
+# --- Meta refresh inside other text-only elements (<script>, <style>, <title>, ...): ignored ---
+
+TEXT_TAGS = ["script", "style", "title", "textarea", "xmp", "iframe", "noembed", "noframes", "plaintext"]
+
+
+@pytest.mark.parametrize("tag", TEXT_TAGS)
+def test_meta_refresh_in_self_closing_text_element_not_flagged(tag: str) -> None:
+    """Browsers ignore the "/" in <script/> etc., so the meta after it is still text, not a tag."""
+    body = _html(f"<{tag}/>{CANARY_TAG}</{tag}>")
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+    assert redirects._meta_refresh_url(body) is None
+
+
+@pytest.mark.parametrize("body", [
+    _html(f"<SCRIPT/>{CANARY_TAG}</SCRIPT>"),                 # tag names are case-insensitive
+    _html(f"<title/>{CANARY_TAG}"),                           # never closed: rest of page is text
+    _html(f"<plaintext/></plaintext>{CANARY_TAG}"),           # plaintext has no end tag at all
+], ids=["upper-case-script", "title-unclosed", "plaintext-end-tag-ignored"])
+def test_meta_refresh_in_text_element_edge_cases_not_flagged(body: bytes) -> None:
+    """Upper case, a missing end tag, or a </plaintext> don't let the meta escape the text."""
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+    assert redirects._meta_refresh_url(body) is None
+
+
+@pytest.mark.parametrize("tag", [t for t in TEXT_TAGS if t != "plaintext"])
+def test_meta_refresh_after_closed_text_element_is_flagged(tag: str) -> None:
+    """Once the closing tag ends the text, a later meta refresh counts again."""
+    body = _html(f"<{tag}/>x</{tag}>{CANARY_TAG}")
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert result["vulnerable_meta_refresh"] == [FIRST_HTTP]
+    assert redirects._meta_refresh_url(body) == "http://redirect-canary.invalid/"
+
+
+def test_meta_refresh_after_self_closing_void_tag_is_flagged() -> None:
+    """<br/> isn't a text element, so it doesn't hide the meta that follows."""
+    body = _html(f"<br/>{CANARY_TAG}")
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert redirects._meta_refresh_url(body) == "http://redirect-canary.invalid/"
+
+
+def test_meta_in_script_is_not_first_meta() -> None:
+    """A same-site meta hidden in <script/> doesn't stop the later canary meta from counting."""
+    body = _html(f"<script/>{SAME_SITE_TAG}</script>{CANARY_TAG}")
+    result = _first_probe_flagged(_page(body))
+    assert result["vulnerable"] == [FIRST_HTTP]
+    assert redirects._meta_refresh_url(body) == "http://redirect-canary.invalid/"
+
+
+@pytest.mark.parametrize("inner", [
+    f"<script/>{CANARY_TAG}</script>",
+    f"<xmp>{CANARY_TAG}</xmp>",
+], ids=["self-closing-script", "xmp"])
+def test_fallback_parser_ignores_meta_in_text_element(inner: str,
+                                                      parser_without_scripting: list[dict]) -> None:
+    """On older Python (no scripting keyword), text elements still hide their meta refresh."""
+    assert redirects._meta_refresh_url(_html(inner)) is None
+    assert {} in parser_without_scripting
+
+
+@pytest.mark.parametrize("inner", [
+    f"<svg><title/></svg>{CANARY_TAG}",                        # SVG <title/> is really empty
+    f"<svg><style/><script/></svg>{CANARY_TAG}",
+    f"<math><style/>{CANARY_TAG}",                             # meta ends the <math> by itself
+    f"<svg><title/><p>{CANARY_TAG}",                           # so does <p>
+    f"<svg/><script/></script>{CANARY_TAG}",                   # <svg/> is empty: back to HTML
+], ids=["svg-title", "svg-style-script", "math-meta-breaks-out", "svg-p-breaks-out", "empty-svg"])
+def test_self_closing_tag_inside_svg_or_math_does_not_hide_meta(inner: str) -> None:
+    """Inside <svg>/<math> the "/" is obeyed, so <title/> etc. don't start text."""
+    assert redirects._meta_refresh_url(_html(inner)) == "http://redirect-canary.invalid/"
+
+
+@pytest.mark.parametrize("inner", [
+    f"<svg></svg><script/>{CANARY_TAG}</script>",              # after </svg>: HTML rules again
+    f"<svg><p><title/>{CANARY_TAG}",                           # <p> left the svg, so <title/> is text
+], ids=["after-closed-svg", "after-breakout"])
+def test_text_element_after_leaving_svg_still_hides_meta(inner: str) -> None:
+    """Once the <svg> is over, <script/> or <title/> starts text again."""
+    assert redirects._meta_refresh_url(_html(inner)) is None

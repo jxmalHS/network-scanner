@@ -62,7 +62,18 @@ class _MetaRefreshFinder(HTMLParser):
 
     Reads the page like a browser with JavaScript on: <noscript> content is plain text, and
     anything inside <template> is inert, so a meta refresh in either is ignored.
+    Inside <svg>/<math> a "/" does close a tag, so <svg><title/></svg> doesn't hide the page.
     """
+
+    # Tags whose content a browser reads as text, even when written as <tag/> (the "/" is ignored).
+    TEXT_ELEMENTS = frozenset({"script", "style", "title", "textarea", "xmp", "iframe", "noembed",
+                               "noframes", "plaintext", "noscript"})
+    # HTML tags that end an open <svg>/<math> in a browser (meta is one of them).
+    BREAKOUT_TAGS = frozenset({"b", "big", "blockquote", "body", "br", "center", "code", "dd", "div",
+                               "dl", "dt", "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head",
+                               "hr", "i", "img", "li", "listing", "menu", "meta", "nobr", "ol", "p",
+                               "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup",
+                               "table", "tt", "u", "ul", "var"})
 
     def __init__(self) -> None:
         try:
@@ -71,14 +82,26 @@ class _MetaRefreshFinder(HTMLParser):
             super().__init__()
         self.content: str | None = None
         self.template_depth = 0                 # how many <template> elements we're inside
+        self.foreign_depth = 0                  # how many <svg>/<math> elements we're inside
+
+    def _breaks_out(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        """True if this start tag ends <svg>/<math> content and is read as HTML again."""
+        return tag in self.BREAKOUT_TAGS or (
+            tag == "font" and any(name in ("color", "face", "size") for name, _ in attrs))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in ("svg", "math"):
+            self.foreign_depth += 1
+            return
+        if self.foreign_depth and self._breaks_out(tag, attrs):
+            self.foreign_depth = 0
         if tag == "template":
             self.template_depth += 1
             return
-        if tag == "noscript":
-            # Everything up to </noscript> is plain text, as in a browser with JavaScript on.
-            # Needed on older Python and for <noscript/>, which html.parser doesn't do this for.
+        if tag in self.TEXT_ELEMENTS:
+            # Everything up to the closing tag is plain text in a browser (noscript: with JavaScript
+            # on; plaintext: the whole rest of the page). html.parser misses <script/>, <noscript/>
+            # etc. and, on older Python, several of these tags, so it is switched on here as well.
             self.set_cdata_mode(tag)
             return
         if tag != "meta" or self.content is not None or self.template_depth:
@@ -88,12 +111,17 @@ class _MetaRefreshFinder(HTMLParser):
             self.content = values["content"]
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # Browsers ignore the "/" in <template/>: it still opens a template.
+        # Browsers ignore the "/" in <template/>, <script/> etc.: they still open as usual.
+        # But <svg/>, <math/> and tags inside them (<svg><title/>) really are empty.
+        if tag in ("svg", "math") or (self.foreign_depth and not self._breaks_out(tag, attrs)):
+            return
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "template" and self.template_depth:
             self.template_depth -= 1            # a stray </template> is ignored, as in browsers
+        elif tag in ("svg", "math") and self.foreign_depth:
+            self.foreign_depth -= 1
 
 
 ASCII_WHITESPACE = "\t\n\x0c\r "     # the only "whitespace" in the HTML refresh rules (not NBSP etc.)
