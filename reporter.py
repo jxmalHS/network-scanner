@@ -82,9 +82,12 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
             for header in header_results["present"]:
                 f.write(f"[PRESENT] {header}\n")
             if header_results.get("hsts_short"):    # headers.py decides what counts as too short
-                days = f" (about {max_age // 86400} days)" if max_age >= 86400 else ""
-                f.write(f"[WARNING] HSTS max-age is only {max_age} seconds{days}; "
-                        f"6 months or more is recommended\n")
+                if isinstance(max_age, int) and not isinstance(max_age, bool):
+                    days = f" (about {max_age // 86400} days)" if max_age >= 86400 else ""
+                    f.write(f"[WARNING] HSTS max-age is only {max_age} seconds{days}; "
+                            f"6 months or more is recommended\n")
+                else:   # flag set without a usable number: still warn, don't crash
+                    f.write("[WARNING] HSTS max-age is shorter than recommended (6 months or more)\n")
             for header in header_results["missing"]:
                 f.write(f"[MISSING] {header}{_hsts_missing_reason(header, header_results)}\n")
             for header in header_results.get("not_applicable", []):

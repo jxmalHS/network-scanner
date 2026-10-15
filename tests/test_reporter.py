@@ -701,3 +701,17 @@ def test_generate_report_cert_problem_without_error_text_does_not_crash() -> Non
 def test_reporter_does_not_import_hsts_threshold() -> None:
     """The reporter only formats results; the "too short" threshold lives in headers.py."""
     assert not hasattr(reporter, "HSTS_MIN_MAX_AGE")
+
+
+@pytest.mark.parametrize("bad_max_age", [None, "abc", True], ids=["none", "text", "bool"])
+def test_generate_report_hsts_short_without_usable_number_still_warns(bad_max_age: Any) -> None:
+    """hsts_short set but no real int max-age: a plain warning instead of a crash."""
+    text = _hsts_report(bad_max_age, present=True, short=True)
+    assert "[WARNING] HSTS max-age is shorter than recommended (6 months or more)\n" in text
+    assert "max-age is only" not in text
+
+
+def test_generate_report_hsts_not_short_has_no_warning() -> None:
+    """hsts_short False: no HSTS warning at all, whatever max-age says."""
+    text = _hsts_report(172800, present=True, short=False)
+    assert "[WARNING] HSTS" not in text
