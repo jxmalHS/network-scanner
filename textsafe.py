@@ -10,7 +10,7 @@ MAX_MARKS_IN_A_ROW = 4
 # Invisible Hangul "filler" letters: they look like nothing, so they must not end a run of
 # marks (otherwise "4 marks + filler + 4 marks + ..." rebuilds a Zalgo stack). They are kept,
 # because U+1160 also appears in real old-style Korean text.
-_FILLERS = frozenset("ᅟᅠㅤﾠ")
+_FILLERS = frozenset("\u115f\u1160\u3164\uffa0")
 
 
 def _cap_marks(line: str) -> str:

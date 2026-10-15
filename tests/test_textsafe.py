@@ -81,22 +81,22 @@ def test_clean_text_int_goes_through_str() -> None:
 
 def test_clean_text_keeps_up_to_four_marks_in_a_row() -> None:
     """Four stacked combining accents (U+0301) on one letter are all kept."""
-    assert clean_text("e" + "́" * 4) == "e" + "́" * 4
+    assert clean_text("e" + "\u0301" * 4) == "e" + "\u0301" * 4
 
 
 def test_clean_text_caps_zalgo_marks_at_four() -> None:
     """'Zalgo text' with 30 stacked accents is cut down to 4."""
-    assert clean_text("e" + "́" * 30) == "e" + "́" * 4
+    assert clean_text("e" + "\u0301" * 30) == "e" + "\u0301" * 4
 
 
 def test_clean_text_control_char_between_marks_does_not_reset_the_count() -> None:
     """A NUL hidden between marks is removed first, so it can't be used to sneak more marks in."""
-    assert clean_text("e" + "́" * 3 + "\x00" + "́" * 3) == "e" + "́" * 4
+    assert clean_text("e" + "\u0301" * 3 + "\x00" + "\u0301" * 3) == "e" + "\u0301" * 4
 
 
 def test_clean_text_separate_mark_runs_are_each_kept() -> None:
     """Two letters with 3 accents each: each run is under the cap, so nothing is dropped."""
-    text = "a" + "́" * 3 + "b" + "́" * 3
+    text = "a" + "\u0301" * 3 + "b" + "\u0301" * 3
     assert clean_text(text) == text
 
 
@@ -104,7 +104,7 @@ def test_clean_text_separate_mark_runs_are_each_kept() -> None:
     "text",
     [
         unicodedata.normalize("NFD", "Tiếng Việt"),   # decomposed Vietnamese: 2 marks per letter
-        "क्षि",                              # Devanagari "kshi"
+        "क\u094dष\u093f",                              # Devanagari "kshi"
     ],
     ids=["vietnamese_decomposed", "devanagari"],
 )
@@ -113,19 +113,19 @@ def test_clean_text_real_scripts_are_unchanged(text: str) -> None:
     assert clean_text(text) == text
 
 
-@pytest.mark.parametrize("filler", ["ᅟ", "ᅠ", "ㅤ", "ﾠ"])
+@pytest.mark.parametrize("filler", ["\u115f", "\u1160", "\u3164", "\uffa0"])
 def test_clean_text_filler_letters_do_not_reset_the_mark_cap(filler: str) -> None:
     """An invisible filler between two 3-mark runs doesn't buy extra marks: 4 in total survive."""
-    text = "a" + "́" * 3 + filler + "́" * 3
-    assert clean_text(text) == "a" + "́" * 3 + filler + "́"
+    text = "a" + "\u0301" * 3 + filler + "\u0301" * 3
+    assert clean_text(text) == "a" + "\u0301" * 3 + filler + "\u0301"
 
 
 def test_clean_text_old_style_korean_with_filler_is_unchanged() -> None:
     """Real old-style Korean jamo using U+1160 (jungseong filler) comes through untouched."""
-    text = "ᄀᅠᆨ 한"
+    text = "ᄀ\u1160ᆨ 한"
     assert clean_text(text) == text
 
 
 def test_clean_text_fillers_without_marks_are_unchanged() -> None:
     """Fillers on their own (no accent marks around them) are kept as they are."""
-    assert clean_text("xㅤyﾠz") == "xㅤyﾠz"
+    assert clean_text("x\u3164y\uffa0z") == "x\u3164y\uffa0z"
