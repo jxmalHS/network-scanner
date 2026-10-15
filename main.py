@@ -1,13 +1,16 @@
 import argparse
 import ipaddress
+import os
 import re
 import signal
 import sys
+import traceback
 from scanner import DEFAULT_WORKERS, HostResolutionError, resolve_host, scan_ports
 from headers import check_headers
 from reporter import generate_report
 from redirects import check_open_redirect
 from ssl_checker import check_ssl
+from textsafe import clean_text
 
 COMMON_PORTS = [21,22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 8080, 8443]
 
@@ -80,7 +83,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        run_scan(args)
+        had_internal_errors = run_scan(args)
     except KeyboardInterrupt:
         # Already stopping: ignore further Ctrl+C presses while the last scans (at most ~2 s)
         # finish and files are cleaned up, so Python doesn't print shutdown noise.
@@ -90,12 +93,36 @@ def main() -> None:
     except HostResolutionError as e:
         print(f"\n[!] Could not resolve host: {e}")   # no report: there is nothing to assess
         sys.exit(1)
+    if had_internal_errors:
+        sys.exit(1)                    # the report was written, but some checks didn't run
 
 
-def run_scan(args: argparse.Namespace) -> None:
-    """Run every check in order and write the report."""
+def _run_check(label: str, key: str, errors: dict[str, str], func, *args):
+    """Run one check; if it crashes because of a bug in the scanner, say so loudly and go on.
+
+    The other checks still run and the report is still written, but the bug is shown on the
+    console, in that report section, and through exit code 1. Ctrl+C and "host not found"
+    are not bugs, so they pass straight through.
+    """
+    try:
+        return func(*args)
+    except HostResolutionError:
+        raise
+    except Exception as e:                  # Exception, not BaseException: Ctrl+C passes through
+        frame = traceback.extract_tb(e.__traceback__)[-1]
+        detail = (f"{type(e).__name__}: {clean_text(str(e))} "
+                  f"({os.path.basename(frame.filename)} line {frame.lineno})")
+        print(f"[!] Internal error in {label}: {detail} — this is a bug in the scanner, "
+              f"please report it")
+        errors[key] = detail
+        return None
+
+
+def run_scan(args: argparse.Namespace) -> bool:
+    """Run every check in order and write the report. True if any check hit an internal error."""
     host = args.host
     ports = args.ports
+    errors: dict[str, str] = {}
 
     # Look the name up once (raises HostResolutionError), so the port scan and the report
     # both use the same address. The other checks keep the name: TLS needs it.
@@ -105,8 +132,8 @@ def run_scan(args: argparse.Namespace) -> None:
     print(f"\n[*] Starting scan on {target}")
 
     print(f"[*] Scanning {len(ports)} ports ({args.workers} at a time)...")
-    open_ports = scan_ports(address, ports, args.workers)
-    for entry in open_ports:
+    open_ports = _run_check("the port scan", "ports", errors, scan_ports, address, ports, args.workers)
+    for entry in open_ports or []:
         if entry["banner"]:
             print(f"[+] Port {entry['port']} open — {entry['banner'][:50]}")
         elif entry["banner"] == "":
@@ -115,20 +142,24 @@ def run_scan(args: argparse.Namespace) -> None:
             print(f"[+] Port {entry['port']} open — no banner")
 
     print("[*] Checking security headers...")
-    header_results = check_headers(host)
+    header_results = _run_check("the header check", "headers", errors, check_headers, host)
 
     print("[*] Checking for open redirects...")
-    redirect_results = check_open_redirect(host)
-    if not redirect_results["complete"] or redirect_results["probes_skipped"] > 0:
+    redirect_results = _run_check("the redirect check", "redirects", errors, check_open_redirect, host)
+    if redirect_results is not None and (
+            not redirect_results["complete"] or redirect_results["probes_skipped"] > 0):
         print("[!] Redirect check incomplete — see the report for details")
 
     print("[*] Checking SSL/TLS certificate...")
-    ssl_results = check_ssl(host)
-    
+    ssl_results = _run_check("the SSL/TLS check", "ssl", errors, check_ssl, host)
+
     print("[*] Generating report...")
     filename = generate_report(host, open_ports, header_results, redirect_results, ssl_results,
-                               address=address)
+                               address=address, internal_errors=errors)
     print(f"[+] Report saved to {filename}\n")
+    if errors:
+        print(f"[!] {len(errors)} check(s) hit an internal error; their report sections are incomplete")
+    return bool(errors)
 
 if __name__ == "__main__":
     main()

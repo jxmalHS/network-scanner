@@ -123,7 +123,7 @@ def test_main_passes_all_results_to_reporter(monkeypatch: pytest.MonkeyPatch, ch
     _run(monkeypatch, "localhost")
     checks["generate_report"].assert_called_once_with(
         "localhost", [], {"present": [], "missing": []}, REDIRECT_RESULTS, {"error": "refused"},
-        address="127.0.0.1",
+        address="127.0.0.1", internal_errors={},
     )
 
 
@@ -494,3 +494,73 @@ def test_main_normal_run_leaves_ctrl_c_alone(
     """A scan that isn't interrupted never touches the Ctrl+C handling."""
     _run(monkeypatch, "localhost")
     fake_signal.assert_not_called()
+
+
+# --- Safety net: a bug in one check doesn't lose the rest, but stays loud ---------
+
+
+def test_main_internal_error_in_one_check_still_runs_the_others(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """check_ssl crashes with a bug: headers/redirects still run, the report is written, exit code 1."""
+    checks["check_ssl"].side_effect = ValueError("boom")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 1
+    checks["check_headers"].assert_called_once()
+    checks["check_open_redirect"].assert_called_once()
+    kwargs = checks["generate_report"].call_args.kwargs
+    args = checks["generate_report"].call_args.args
+    assert args[4] is None                                  # ssl_results: the check didn't produce any
+    assert "ValueError: boom" in kwargs["internal_errors"]["ssl"]
+    out = capsys.readouterr().out
+    assert "[!] Internal error in the SSL/TLS check: ValueError: boom" in out
+    assert "please report it" in out
+    assert out.index("Report saved") < out.index("1 check(s) hit an internal error")
+
+
+def test_main_internal_error_in_port_scan_does_not_crash_the_banner_loop(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """scan_ports crashing gives open_ports None; the console loop copes and the report is written."""
+    checks["scan_ports"].side_effect = RuntimeError("bug")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 1
+    checks["generate_report"].assert_called_once()
+    assert "ports" in checks["generate_report"].call_args.kwargs["internal_errors"]
+
+
+def test_main_internal_error_in_redirect_check_skips_its_console_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A crashed redirect check (None result) doesn't trip the 'incomplete' console line."""
+    checks["check_open_redirect"].side_effect = KeyError("x")
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "localhost")
+    out = capsys.readouterr().out
+    assert "Redirect check incomplete" not in out
+    assert "Internal error in the redirect check: KeyError" in out
+
+
+def test_main_ctrl_c_inside_a_check_is_not_swallowed_by_the_safety_net(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """Ctrl+C during a check still aborts the scan (exit 130) instead of counting as a bug."""
+    checks["check_headers"].side_effect = KeyboardInterrupt
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 130
+    checks["generate_report"].assert_not_called()
+
+
+def test_main_internal_error_message_is_cleaned(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """An error message carrying server text can't put escape codes or fake lines on the console."""
+    checks["check_headers"].side_effect = ValueError("evil\x1b[2J\n[+] Port 1 open")
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "localhost")
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "\n[+] Port 1 open" not in out

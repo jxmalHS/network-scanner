@@ -745,3 +745,38 @@ def test_generate_report_rename_failure_removes_tmp(in_tmp_dir: Path) -> None:
         with pytest.raises(OSError, match="disk full"):
             reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)
     assert list(in_tmp_dir.iterdir()) == []
+
+
+
+@pytest.mark.parametrize(
+    ("key", "heading", "kwarg"),
+    [
+        ("ports", "OPEN PORTS", "open_ports"),
+        ("headers", "HTTP SECURITY HEADERS", "header_results"),
+        ("redirects", "OPEN REDIRECT CHECK", "redirect_results"),
+        ("ssl", "SSL/TLS CERTIFICATE", "ssl_results"),
+    ],
+)
+def test_generate_report_internal_error_section(key: str, heading: str, kwarg: str) -> None:
+    """A crashed check gets an [INTERNAL ERROR] line in its own section; the others are normal."""
+    detail = "ValueError: x (ssl_checker.py line 81)"
+    results = {"open_ports": [], "header_results": NO_HEADERS,
+               "redirect_results": _redirects(), "ssl_results": VALID_SSL}
+    results[kwarg] = None                       # the crashed check produced nothing
+    filename = reporter.generate_report("example.com", **results, internal_errors={key: detail})
+    text = Path(filename).read_text(encoding="utf-8")
+    section = text.split(heading + "\n", 1)[1]
+    assert section.split("\n", 2)[1].startswith(f"[INTERNAL ERROR] Check did not run: {detail}.")
+    assert "please report it" in text
+    assert text.count("[INTERNAL ERROR]") == 1
+
+
+@pytest.mark.parametrize("internal_errors", [None, {}])
+def test_generate_report_no_internal_errors_is_unchanged(internal_errors: object) -> None:
+    """internal_errors None or empty: the report is exactly what it was before the safety net."""
+    plain = Path(reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)).read_text(encoding="utf-8")
+    with_arg = Path(reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL,
+                                             internal_errors=internal_errors)).read_text(encoding="utf-8")
+    strip_date = lambda t: "\n".join(l for l in t.splitlines() if not l.startswith("Date:"))
+    assert strip_date(with_arg) == strip_date(plain)
+    assert "[INTERNAL ERROR]" not in with_arg
