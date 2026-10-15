@@ -1,4 +1,5 @@
 import re
+import threading
 import time
 from html.parser import HTMLParser
 from http.cookiejar import DefaultCookiePolicy
@@ -24,6 +25,8 @@ SWITCH_WINDOW = 4        # the HTTPS switch is decided within the first 4 HTTP p
 FAILURES_TO_STOP = 2     # give up after this many failed connections in a row
 MAX_BODY_BYTES = 64 * 1024   # read at most 64 KB of a page when looking for <meta refresh>
 MAX_BODY_SECONDS = 5         # and spend at most 5 s reading it, however slowly it arrives
+
+_now = time.monotonic        # (a module-level name tests can patch without touching the time module)
 
 
 def _browser_target(base: str, location: str) -> str:
@@ -87,20 +90,26 @@ def _refresh_url(content: str | None) -> str | None:
 def _read_capped(response: requests.Response) -> bytes:
     """At most MAX_BODY_BYTES of the body, read for at most MAX_BODY_SECONDS in total.
 
-    read1 returns as soon as *some* bytes arrive, so a server that drips one byte every few
-    seconds can't keep a probe busy for hours (the 5 s timeout only limits each single wait).
-    A body that breaks off halfway gives what arrived.
+    The 5 s socket timeout only limits each single wait, and one read1 call can keep waiting
+    (e.g. a gzip header or chunk-size line dripped a byte at a time never produces output).
+    So a watchdog timer shuts the connection down when time is up, which makes any stuck
+    read fail at once. A body that breaks off halfway gives what arrived.
     """
     data = bytearray()
-    deadline = time.monotonic() + MAX_BODY_SECONDS
+    deadline = _now() + MAX_BODY_SECONDS
+    watchdog = threading.Timer(MAX_BODY_SECONDS, response.raw.shutdown)
+    watchdog.daemon = True
+    watchdog.start()
     try:
-        while len(data) < MAX_BODY_BYTES and time.monotonic() < deadline:
+        while len(data) < MAX_BODY_BYTES and _now() < deadline:
             chunk = response.raw.read1(8192, decode_content=True)
             if not chunk:
                 break
             data += chunk
     except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError):
         pass
+    finally:
+        watchdog.cancel()
     return bytes(data[:MAX_BODY_BYTES])
 
 

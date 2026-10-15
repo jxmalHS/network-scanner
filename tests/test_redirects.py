@@ -1,5 +1,6 @@
 """Tests for redirects.py - open redirect check (requests.Session mocked, nothing is ever sent)."""
 import email.message
+import threading
 from collections.abc import Iterator
 from http.cookiejar import DefaultCookiePolicy
 from unittest.mock import MagicMock, call, patch
@@ -937,8 +938,36 @@ def test_body_read_stops_at_the_time_limit_for_a_slow_drip_server() -> None:
     response = _page()
     response.raw.read1.side_effect = lambda amt=8192, **kwargs: b"a"
     clock = iter(range(0, 10_000, 2))          # each look at the clock is 2 s later
-    with patch("redirects.time.monotonic", side_effect=lambda: next(clock)):
+    with patch("redirects._now", side_effect=lambda: next(clock)):
         result = _first_probe_flagged(response)
     assert redirects.MAX_BODY_SECONDS == 5
     assert response.raw.read1.call_count <= 3  # deadline 5 s: stops after a couple of reads
     assert result["probes_skipped"] == 0
+
+
+def test_body_read_watchdog_breaks_a_stuck_read() -> None:
+    """A single read1 that never returns (e.g. an endless gzip header) is cut off by the watchdog."""
+    response = _page()
+    unblocked = threading.Event()
+
+    def stuck_read(amt: int = 8192, **kwargs: object) -> bytes:
+        if not unblocked.wait(timeout=5):          # a real stuck socket would wait forever
+            raise AssertionError("watchdog never shut the connection down")
+        raise urllib3.exceptions.ProtocolError("connection shut down")
+
+    response.raw.read1.side_effect = stuck_read
+    response.raw.shutdown.side_effect = unblocked.set   # what the real shutdown() does to a blocked read
+    with patch("redirects.MAX_BODY_SECONDS", 0.05):
+        result = _first_probe_flagged(response)
+    response.raw.shutdown.assert_called()
+    assert result["vulnerable"] == []
+    assert result["probes_skipped"] == 0
+
+
+def test_body_read_watchdog_is_cancelled_after_a_normal_read() -> None:
+    """When the page is read normally, the watchdog never fires (the connection isn't shut down)."""
+    response = _page(_meta("0;url=/home"))
+    with patch("redirects.MAX_BODY_SECONDS", 0.05):
+        _first_probe_flagged(response)
+        threading.Event().wait(0.15)                 # longer than the watchdog's time limit
+    response.raw.shutdown.assert_not_called()
