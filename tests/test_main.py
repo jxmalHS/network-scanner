@@ -424,10 +424,10 @@ def test_main_bad_host_still_exits_2_not_130(
     assert "Scan aborted" not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("value", ["fe80::1", "FE80::abcd", "febf::1"])
+@pytest.mark.parametrize("value", ["fe80::1", "FE80::abcd", "febf::1", "ff02::1", "ff05::2"])
 def test_valid_host_rejects_link_local_ipv6(value: str) -> None:
     """fe80::/10 without a zone ID would show every port closed, so it's refused up front."""
-    with pytest.raises(argparse.ArgumentTypeError, match="link-local IPv6"):
+    with pytest.raises(argparse.ArgumentTypeError, match="link-local and multicast IPv6"):
         main_module.valid_host(value)
 
 
