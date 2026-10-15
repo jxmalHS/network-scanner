@@ -1,6 +1,7 @@
 import contextlib
 import os
 import re
+import time
 from datetime import datetime
 
 from textsafe import clean_text
@@ -43,12 +44,31 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
     try:
         _write_report(tmp, host, open_ports, header_results, redirect_results, ssl_results, address,
                       internal_errors or {})
-        os.replace(tmp, filename)      # one atomic rename: never a half-written report
+        _replace_with_retry(tmp, filename)   # one atomic rename: never a half-written report
     except BaseException:              # includes Ctrl+C; always re-raised after cleaning up
         with contextlib.suppress(OSError):
             os.remove(tmp)
         raise
     return filename
+
+
+RENAME_ATTEMPTS = 5
+
+
+def _replace_with_retry(tmp: str, filename: str) -> None:
+    """os.replace, retried briefly if Windows says the file is busy.
+
+    Antivirus or a search indexer can hold a just-written file open for a moment, which
+    makes the rename fail with PermissionError; waiting a little usually clears it.
+    """
+    for attempt in range(RENAME_ATTEMPTS):
+        try:
+            os.replace(tmp, filename)
+            return
+        except PermissionError:
+            if attempt == RENAME_ATTEMPTS - 1:
+                raise
+            time.sleep(0.1)
 
 
 def _internal_error_line(detail: str) -> str:

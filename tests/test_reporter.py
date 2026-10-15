@@ -780,3 +780,31 @@ def test_generate_report_no_internal_errors_is_unchanged(internal_errors: object
     strip_date = lambda t: "\n".join(l for l in t.splitlines() if not l.startswith("Date:"))
     assert strip_date(with_arg) == strip_date(plain)
     assert "[INTERNAL ERROR]" not in with_arg
+
+
+
+def test_generate_report_retries_a_briefly_locked_rename(in_tmp_dir: Path) -> None:
+    """Windows says "busy" twice (antivirus), then the rename works: the report is saved."""
+    real_replace = reporter.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src: str, dst: str) -> None:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("file is being used by another process")
+        real_replace(src, dst)
+
+    with patch("reporter.os.replace", side_effect=flaky_replace), patch("reporter.time.sleep") as nap:
+        filename = reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)
+    assert sorted(p.name for p in in_tmp_dir.iterdir()) == [filename]
+    assert nap.call_count == 2
+
+
+def test_generate_report_gives_up_after_repeated_locks_and_cleans_up(in_tmp_dir: Path) -> None:
+    """Still locked after every retry: the error propagates and no .tmp file is left behind."""
+    with patch("reporter.os.replace", side_effect=PermissionError("locked")) as rep, \
+            patch("reporter.time.sleep"):
+        with pytest.raises(PermissionError):
+            reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)
+    assert rep.call_count == reporter.RENAME_ATTEMPTS
+    assert list(in_tmp_dir.iterdir()) == []
