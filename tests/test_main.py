@@ -413,3 +413,27 @@ def test_main_bad_host_still_exits_2_not_130(
         _run(monkeypatch, "site.com/path")
     assert exc.value.code == 2
     assert "Scan aborted" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", ["fe80::1", "FE80::abcd", "febf::1"])
+def test_valid_host_rejects_link_local_ipv6(value: str) -> None:
+    """fe80::/10 without a zone ID would show every port closed, so it's refused up front."""
+    with pytest.raises(argparse.ArgumentTypeError, match="link-local IPv6"):
+        main_module.valid_host(value)
+
+
+@pytest.mark.parametrize("value", ["fec0::1", "::1", "2001:db8::1", "169.254.1.1"])
+def test_valid_host_accepts_addresses_outside_ipv6_link_local(value: str) -> None:
+    """Just outside fe80::/10, loopback, global IPv6 and IPv4 link-local (no zone needed) are fine."""
+    assert main_module.valid_host(value) == value
+
+
+def test_main_link_local_ipv6_exits_2_without_scanning(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """Running main with fe80::1 stops at argparse (exit 2): no lookup, no scan."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "fe80::1")
+    assert exc.value.code == 2
+    checks["resolve_host"].assert_not_called()
+    checks["scan_ports"].assert_not_called()

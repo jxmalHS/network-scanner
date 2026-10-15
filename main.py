@@ -16,10 +16,16 @@ def valid_host(value: str) -> str:
     if "%" in value:                           # IPv6 zone IDs (fe80::1%eth0) break URLs
         raise argparse.ArgumentTypeError(f"IPv6 zone IDs (%...) are not supported: {value!r}")
     try:
-        ipaddress.ip_address(value)            # IPv4 or IPv6 address
-        return value
+        ip = ipaddress.ip_address(value)       # IPv4 or IPv6 address
     except ValueError:
-        pass
+        ip = None
+    if ip is not None:
+        if ip.version == 6 and ip.is_link_local:   # fe80::/10
+            raise argparse.ArgumentTypeError(
+                f"link-local IPv6 addresses (fe80::...) aren't supported: they only work with a "
+                f"zone ID naming the network card, and without one every port would wrongly "
+                f"look closed: {value!r}")
+        return value
     if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", value):
         raise argparse.ArgumentTypeError(f"not a plain hostname or IP address: {value!r}")
     return value
