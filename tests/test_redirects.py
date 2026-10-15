@@ -1204,3 +1204,12 @@ def test_body_read_watchdog_is_cancelled_after_a_normal_read() -> None:
         _first_probe_flagged(response)
         threading.Event().wait(0.15)                 # longer than the watchdog's time limit
     response.raw.shutdown.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [ValueError, RuntimeError, OSError])
+def test_stop_reading_ignores_an_already_closed_connection(error: type[Exception]) -> None:
+    """If the watchdog fires just after the read finished, urllib3's complaint is ignored quietly."""
+    raw = MagicMock()
+    raw.shutdown.side_effect = error("already closed")
+    redirects._stop_reading(raw)            # must not raise (no "Exception in thread" noise)
+    raw.shutdown.assert_called_once()

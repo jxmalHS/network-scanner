@@ -1,3 +1,4 @@
+import contextlib
 import re
 import threading
 import time
@@ -125,6 +126,17 @@ def _refresh_url(content: str | None) -> str | None:
     return url.strip(ASCII_WHITESPACE) or None
 
 
+def _stop_reading(raw) -> None:
+    """Watchdog action: shut the connection so a stuck read fails at once.
+
+    If the read already finished and the connection was closed or handed back, urllib3
+    raises; that's the harmless outcome of the race, so it's ignored instead of printing
+    an "Exception in thread" message.
+    """
+    with contextlib.suppress(ValueError, RuntimeError, OSError):
+        raw.shutdown()
+
+
 def _read_capped(response: requests.Response) -> bytes:
     """At most MAX_BODY_BYTES of the body, read for at most MAX_BODY_SECONDS in total.
 
@@ -135,7 +147,7 @@ def _read_capped(response: requests.Response) -> bytes:
     """
     data = bytearray()
     deadline = _now() + MAX_BODY_SECONDS
-    watchdog = threading.Timer(MAX_BODY_SECONDS, response.raw.shutdown)
+    watchdog = threading.Timer(MAX_BODY_SECONDS, _stop_reading, args=(response.raw,))
     watchdog.daemon = True
     watchdog.start()
     try:
