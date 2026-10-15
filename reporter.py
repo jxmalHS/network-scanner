@@ -1,3 +1,5 @@
+import contextlib
+import os
 import re
 from datetime import datetime
 
@@ -31,13 +33,25 @@ def _hsts_missing_reason(header: str, header_results: dict) -> str:
 
 
 def generate_report(host, open_ports, header_results, redirect_results, ssl_results, address=None):
-
+    """Write the report and return its filename. The file appears complete or not at all."""
     # e.g. "::1" -> "__1" (":" is illegal in Windows filenames); [:100] keeps long names under
     # Windows' 255-character filename limit.
     safe_host = re.sub(r"[^A-Za-z0-9.-]", "_", host)[:100]
     filename = f"report_{safe_host}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    tmp = filename + ".tmp"
+    try:
+        _write_report(tmp, host, open_ports, header_results, redirect_results, ssl_results, address)
+        os.replace(tmp, filename)      # one atomic rename: never a half-written report
+    except BaseException:              # includes Ctrl+C; always re-raised after cleaning up
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+    return filename
 
-    with open(filename, "w", encoding="utf-8") as f:
+
+def _write_report(path, host, open_ports, header_results, redirect_results, ssl_results, address):
+    """Write every report section to path."""
+    with open(path, "w", encoding="utf-8") as f:
         f.write(f"Network Vulnerability Scan Report\n")
         target = host if address in (None, host) else f"{host} ({address})"
         f.write(f"Target: {target}\n")
@@ -168,5 +182,3 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
                 f.write("[CRITICAL] Certificate domain does not match target\n")
             else:
                 f.write("[OK] Domain matches certificate\n")
-
-    return filename

@@ -1,6 +1,7 @@
 """Tests for reporter.py - text report writing (all files go to pytest's tmp_path)."""
 import re
 from pathlib import Path
+from unittest.mock import patch
 from typing import Any
 
 import pytest
@@ -721,3 +722,26 @@ def test_generate_report_hsts_not_short_has_no_warning() -> None:
     """hsts_short False: no HSTS warning at all, whatever max-age says."""
     text = _hsts_report(172800, present=True, short=False)
     assert "[WARNING] HSTS" not in text
+
+
+def test_generate_report_leaves_no_tmp_file_on_success(in_tmp_dir: Path) -> None:
+    """A normal run leaves exactly one finished report and no .tmp file."""
+    filename = reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)
+    assert sorted(p.name for p in in_tmp_dir.iterdir()) == [filename]
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError], ids=["ctrl_c", "bug"])
+def test_generate_report_failure_midway_leaves_no_files(in_tmp_dir: Path, error: type[BaseException]) -> None:
+    """Ctrl+C or a bug while writing: the error still propagates, and no report_* file of any kind remains."""
+    with patch("reporter.clean_text", side_effect=error):
+        with pytest.raises(error):
+            reporter.generate_report("example.com", [], {"error": "x"}, _redirects(), VALID_SSL)
+    assert list(in_tmp_dir.iterdir()) == []
+
+
+def test_generate_report_rename_failure_removes_tmp(in_tmp_dir: Path) -> None:
+    """If the final rename fails, the error propagates and the .tmp file is cleaned up."""
+    with patch("reporter.os.replace", side_effect=OSError("disk full")):
+        with pytest.raises(OSError, match="disk full"):
+            reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)
+    assert list(in_tmp_dir.iterdir()) == []

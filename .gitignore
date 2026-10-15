@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 report_*.txt
 CLAUDE.md
+report_*.txt.tmp
