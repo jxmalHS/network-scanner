@@ -1,7 +1,6 @@
 """Tests for scanner.py - TCP connect scan and banner grabbing (socket fully mocked)."""
 import socket
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -336,11 +335,14 @@ def recording_executor() -> Any:
 def test_scan_ports_keeps_port_order_when_later_ports_finish_first() -> None:
     """Results follow the input port order even if higher ports finish scanning earlier."""
     finished: list[int] = []
-    delays = {1: 0.06, 2: 0.03, 3: 0.0}  # port 1 is the slowest, port 3 the fastest
+    done = {port: threading.Event() for port in (1, 2, 3)}
+    waits_for = {1: [2, 3], 2: [3], 3: []}  # port 3 finishes first, then 2, then 1
 
     def slow_for_low_ports(host: str, port: int, family: int) -> tuple[bool, str]:
-        time.sleep(delays[port])
+        for other in waits_for[port]:
+            assert done[other].wait(timeout=2)  # timeout: a broken test fails instead of hanging
         finished.append(port)
+        done[port].set()
         return True, f"banner-{port}"
 
     with patch("scanner.scan_port", side_effect=slow_for_low_ports):
@@ -406,19 +408,27 @@ def test_scan_ports_propagates_exception_from_scan_port() -> None:
 def test_scan_ports_keyboard_interrupt_stops_remaining_scans() -> None:
     """Ctrl+C on the first port escapes scan_ports and the queued ports are dropped, not scanned."""
     calls: list[int] = []
+    gate = threading.Event()   # later scans wait here until the queue has been cancelled
+
+    class GatedExecutor(ThreadPoolExecutor):
+        def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+            super().shutdown(wait=False, cancel_futures=cancel_futures)  # drop queued ports first
+            gate.set()                                                    # then free the running scan
+            super().shutdown(wait=wait)
 
     def interrupt_first(host: str, port: int, family: int) -> tuple[bool, None]:
         calls.append(port)
         if port == 1:
             raise KeyboardInterrupt
-        time.sleep(0.05)  # keep later scans slow so cancelling clearly wins the race
+        assert gate.wait(timeout=2)
         return False, None
 
-    with patch("scanner.scan_port", side_effect=interrupt_first):
+    with patch("scanner.ThreadPoolExecutor", GatedExecutor), \
+            patch("scanner.scan_port", side_effect=interrupt_first):
         with pytest.raises(KeyboardInterrupt):
             scanner.scan_ports("127.0.0.1", list(range(1, 11)), workers=1)
     assert calls[0] == 1
-    assert len(calls) <= 3  # far fewer than all 10 ports
+    assert len(calls) <= 2  # with 1 worker, at most port 2 can have started before the cancel
 
 
 def test_scan_ports_shuts_pool_down_with_cancel_futures_on_success(recording_executor: Any) -> None:
