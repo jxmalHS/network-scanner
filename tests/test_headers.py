@@ -1,13 +1,15 @@
 """Tests for headers.py - security header check over HTTPS with HTTP fallback (requests.get mocked)."""
 from unittest.mock import MagicMock, call, patch
 
+import pytest
 import requests
 from requests.structures import CaseInsensitiveDict
 
 import headers
 
-ALL_HEADERS = {name: "value" for name in headers.SECURITY_HEADERS}
 HSTS = "Strict-Transport-Security"
+GOOD_HSTS = "max-age=31536000"   # one year: a real, positive max-age, so HSTS counts as present
+ALL_HEADERS = {name: (GOOD_HSTS if name == HSTS else "value") for name in headers.SECURITY_HEADERS}
 NON_HSTS = [h for h in headers.SECURITY_HEADERS if h != HSTS]
 
 
@@ -57,6 +59,46 @@ def test_max_redirects_is_five() -> None:
     assert headers.MAX_REDIRECTS == 5
 
 
+def test_hsts_min_max_age_is_six_months() -> None:
+    """The short-HSTS warning threshold is pinned at 15,768,000 seconds (about 6 months)."""
+    assert headers.HSTS_MIN_MAX_AGE == 15_768_000
+
+
+# --- _hsts_max_age (parsing the HSTS header value) ---------------------------
+
+@pytest.mark.parametrize(("value", "expected"), [
+    pytest.param("max-age=31536000", 31536000, id="plain"),
+    pytest.param("max-age=31536000; includeSubDomains; preload", 31536000, id="with_directives"),
+    pytest.param("MAX-AGE=10", 10, id="upper_case_name"),
+    pytest.param('max-age="10"', 10, id="quoted"),
+    pytest.param(" max-age = 10 ; preload", 10, id="extra_spaces"),
+    pytest.param("max-age=0", 0, id="zero"),
+    pytest.param("max-age=31536000, max-age=31536000", 31536000, id="repeated_header_uses_first"),
+])
+def test_hsts_max_age_reads_valid_values(value: str, expected: int) -> None:
+    """A readable max-age is returned as an int."""
+    assert headers._hsts_max_age(value) == expected
+
+
+@pytest.mark.parametrize("value", [
+    pytest.param("includeSubDomains", id="no_max_age"),
+    pytest.param("max-age=", id="empty_number"),
+    pytest.param("max-age=abc", id="letters"),
+    pytest.param("max-age=-1", id="negative"),
+    pytest.param("max-age=1.5", id="decimal"),
+    pytest.param("max-age=²", id="superscript_two_not_ascii"),
+    pytest.param("max-age=1; max-age=2", id="two_max_ages"),
+    pytest.param('max-age="123', id="unbalanced_quote"),
+    pytest.param('max-age=""5""', id="doubled_quotes"),
+    pytest.param("max-age=31536000; includeSubDomains; includeSubDomains", id="repeated_other_directive"),
+    pytest.param("", id="empty_header"),
+    pytest.param("max-age=" + "9" * 5000, id="absurdly_long_number"),
+])
+def test_hsts_max_age_returns_none_for_unreadable_values(value: str) -> None:
+    """A missing, repeated or non-ASCII-digit max-age gives None instead of a number or a crash."""
+    assert headers._hsts_max_age(value) is None
+
+
 # --- HTTPS works (the normal case) -------------------------------------------
 
 def test_check_headers_all_present_over_https() -> None:
@@ -64,6 +106,7 @@ def test_check_headers_all_present_over_https() -> None:
     with patch("headers.requests.get", return_value=_response(ALL_HEADERS)):
         result = headers.check_headers("example.com")
     assert result == {
+        "hsts_max_age": 31536000,
         "url": "https://example.com",
         "present": headers.SECURITY_HEADERS,
         "missing": [],
@@ -94,7 +137,7 @@ def test_check_headers_reports_missing_hsts_over_https() -> None:
 
 def test_check_headers_matches_names_case_insensitively() -> None:
     """Lower-case header names from the server still count as present."""
-    sent = {name.lower(): "v" for name in headers.SECURITY_HEADERS}
+    sent = {name.lower(): value for name, value in ALL_HEADERS.items()}
     with patch("headers.requests.get", return_value=_response(sent)):
         result = headers.check_headers("example.com")
     assert result["missing"] == []
@@ -271,7 +314,7 @@ def test_fetch_six_redirects_returns_error() -> None:
     hops = [_response({}, location=f"/p{i}") for i in range(6)]
     with patch("headers.requests.get", side_effect=hops) as fake_get:
         result = headers._fetch("https://example.com")
-    assert result == {"error": "more than 5 redirects"}
+    assert result == {"error": "more than 5 redirects", "too_many_redirects": True}
     assert fake_get.call_count == 6
 
 
@@ -280,7 +323,12 @@ def test_check_headers_redirect_loop_on_both_schemes_returns_error() -> None:
     loop = _response({}, location="/again")
     with patch("headers.requests.get", return_value=loop):
         result = headers.check_headers("example.com")
-    assert result == {"error": "more than 5 redirects", "https_error": "more than 5 redirects"}
+    assert result == {
+        "error": "more than 5 redirects",
+        "too_many_redirects": True,          # from the HTTP attempt's own result
+        "https_error": "more than 5 redirects",
+        "https_too_many_redirects": True,    # copied over from the HTTPS attempt
+    }
 
 
 def test_fetch_error_during_redirect_hop_returns_error() -> None:
@@ -436,3 +484,86 @@ def test_check_headers_both_time_out_returns_error_not_exception() -> None:
     with patch("headers.requests.get", side_effect=requests.exceptions.Timeout("timed out")):
         result = headers.check_headers("example.com")
     assert result == {"error": "timed out", "https_error": "timed out"}
+
+
+# --- HSTS max-age judging ----------------------------------------------------
+
+def _check_with_hsts(hsts_value: str) -> dict:
+    """check_headers over HTTPS where the server sends only HSTS with the given value."""
+    with patch("headers.requests.get", return_value=_response({HSTS: hsts_value})):
+        return headers.check_headers("example.com")
+
+
+def test_check_headers_hsts_max_age_zero_counts_as_missing() -> None:
+    """max-age=0 switches HSTS off, so it is missing, and hsts_max_age records the 0."""
+    result = _check_with_hsts("max-age=0")
+    assert HSTS in result["missing"]
+    assert HSTS not in result["present"]
+    assert result["hsts_max_age"] == 0
+
+
+def test_check_headers_hsts_garbled_max_age_counts_as_missing() -> None:
+    """An unreadable max-age is ignored by browsers: missing, with hsts_max_age None."""
+    result = _check_with_hsts("max-age=soon")
+    assert HSTS in result["missing"]
+    assert result["hsts_max_age"] is None
+
+
+def test_check_headers_hsts_good_max_age_counts_as_present() -> None:
+    """A real positive max-age: present, with hsts_max_age as an int."""
+    result = _check_with_hsts("max-age=31536000; includeSubDomains")
+    assert HSTS in result["present"]
+    assert result["hsts_max_age"] == 31536000
+
+
+def test_check_headers_no_hsts_sent_has_no_max_age_key() -> None:
+    """If HSTS isn't sent at all, there is no hsts_max_age key."""
+    with patch("headers.requests.get", return_value=_response({"X-Frame-Options": "DENY"})):
+        result = headers.check_headers("example.com")
+    assert HSTS in result["missing"]
+    assert "hsts_max_age" not in result
+
+
+def test_check_headers_hsts_over_plain_http_has_no_max_age_key() -> None:
+    """HSTS sent over plain HTTP is N/A and its max-age is not parsed or recorded."""
+    with patch(
+        "headers.requests.get",
+        side_effect=[requests.exceptions.ConnectionError("refused"), _response({HSTS: "max-age=0"})],
+    ):
+        result = headers.check_headers("example.com")
+    assert result["not_applicable"] == [HSTS]
+    assert "hsts_max_age" not in result
+
+
+# --- too-many-redirects flag on the HTTPS attempt ----------------------------
+
+def test_check_headers_https_redirect_loop_then_http_ok_sets_flag() -> None:
+    """HTTPS redirects 6 times, HTTP works: https_too_many_redirects is True and the HTTP result is used."""
+    loop = [_response({}, location=f"/p{i}") for i in range(6)]
+    with patch("headers.requests.get", side_effect=[*loop, _response({})]):
+        result = headers.check_headers("example.com")
+    assert result["url"] == "http://example.com"
+    assert result["https_error"] == "more than 5 redirects"
+    assert result["https_too_many_redirects"] is True
+    assert "https_tls_problem" not in result
+
+
+def test_check_headers_connection_error_fallback_has_no_redirect_flag() -> None:
+    """A plain connection failure on HTTPS does not set https_too_many_redirects."""
+    with patch(
+        "headers.requests.get",
+        side_effect=[requests.exceptions.ConnectionError("443 refused"), _response({})],
+    ):
+        result = headers.check_headers("example.com")
+    assert "https_too_many_redirects" not in result
+
+
+def test_check_headers_ssl_error_fallback_has_no_redirect_flag() -> None:
+    """An SSLError on HTTPS sets the TLS flag but not https_too_many_redirects."""
+    with patch(
+        "headers.requests.get",
+        side_effect=[requests.exceptions.SSLError("bad cert"), _response({})],
+    ):
+        result = headers.check_headers("example.com")
+    assert result["https_tls_problem"] is True
+    assert "https_too_many_redirects" not in result

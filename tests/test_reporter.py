@@ -163,10 +163,106 @@ def test_generate_report_header_error() -> None:
 
 
 def test_generate_report_header_error_skips_https_warning() -> None:
-    """When both HTTPS and HTTP failed, only the error line is written, not the fallback warning."""
+    """When both HTTPS and HTTP failed, three error lines are written, not the fallback warning."""
     text = _report(header_results={"error": "80 refused", "https_error": "443 refused"})
-    assert "Error fetching headers: 80 refused\n" in text
+    assert (
+        "Error fetching headers: HTTPS and HTTP both failed\n"
+        "HTTPS (could not connect): 443 refused\n"
+        "HTTP: 80 refused\n"
+    ) in text
     assert "HTTPS attempt failed" not in text
+
+
+def test_generate_report_both_failed_names_tls_problem() -> None:
+    """Both failed with the HTTPS side a TLS problem: the HTTPS line says so."""
+    text = _report(header_results={"error": "80 refused", "https_error": "bad cert",
+                                   "https_tls_problem": True})
+    assert "HTTPS (TLS problem): bad cert\n" in text
+
+
+def test_generate_report_both_failed_cannot_inject_fake_line() -> None:
+    """A newline in https_error can't start a fake '[PRESENT] X' line in the both-failed block."""
+    text = _report(header_results={"error": "80 refused",
+                                   "https_error": "oops\n[PRESENT] X"})
+    assert not any(line.startswith("[PRESENT] X") for line in text.splitlines())
+
+
+def test_generate_report_https_fallback_warning_too_many_redirects() -> None:
+    """https_too_many_redirects: the fallback warning says '(too many redirects)'."""
+    text = _report(header_results={
+        "url": "http://example.com", "https_error": "more than 5 redirects",
+        "https_too_many_redirects": True,
+        "present": [], "missing": [], "not_applicable": ["Strict-Transport-Security"],
+    })
+    assert (
+        "[WARNING] HTTPS attempt failed (too many redirects) — fell back to http://\n"
+        "Details: more than 5 redirects\n"
+    ) in text
+
+
+def test_generate_report_tls_problem_wins_over_too_many_redirects() -> None:
+    """If both flags are set, the TLS problem is what gets reported."""
+    text = _report(header_results={
+        "url": "http://example.com", "https_error": "x",
+        "https_tls_problem": True, "https_too_many_redirects": True,
+        "present": [], "missing": [], "not_applicable": [],
+    })
+    assert "HTTPS attempt failed (TLS problem)" in text
+    assert "too many redirects" not in text
+
+
+# --- HSTS max-age wording ----------------------------------------------------
+
+def _hsts_report(max_age: Any, present: bool) -> str:
+    """Report over HTTPS with HSTS present or missing and the given hsts_max_age."""
+    hsts = ["Strict-Transport-Security"]
+    return _report(header_results={
+        "url": "https://example.com", "hsts_max_age": max_age,
+        "present": hsts if present else [], "missing": [] if present else hsts,
+        "not_applicable": [],
+    })
+
+
+def test_generate_report_hsts_max_age_zero_missing_reason() -> None:
+    """hsts_max_age 0: the [MISSING] line explains max-age=0 switches HSTS off."""
+    text = _hsts_report(0, present=False)
+    assert ("[MISSING] Strict-Transport-Security "
+            "(sent with max-age=0, which switches HSTS off)\n") in text
+
+
+def test_generate_report_hsts_unreadable_max_age_missing_reason() -> None:
+    """hsts_max_age None: the [MISSING] line says max-age is missing or unreadable."""
+    text = _hsts_report(None, present=False)
+    assert ("[MISSING] Strict-Transport-Security "
+            "(sent, but max-age is missing or unreadable, so browsers ignore it)\n") in text
+
+
+def test_generate_report_short_hsts_max_age_warning() -> None:
+    """A present HSTS with a 2-day max-age gets a warning with seconds and days, after [PRESENT]."""
+    text = _hsts_report(172800, present=True)
+    warning = ("[WARNING] HSTS max-age is only 172800 seconds (about 2 days); "
+               "6 months or more is recommended\n")
+    assert "[PRESENT] Strict-Transport-Security\n" + warning in text
+
+
+def test_generate_report_short_hsts_under_a_day_shows_seconds_only() -> None:
+    """A max-age under one day doesn't print the odd "about 0 days"."""
+    text = _hsts_report(300, present=True)
+    assert "[WARNING] HSTS max-age is only 300 seconds; 6 months or more is recommended\n" in text
+    assert "about 0 days" not in text
+
+
+def test_generate_report_no_hsts_warning_at_exactly_six_months() -> None:
+    """max-age exactly HSTS_MIN_MAX_AGE is long enough: no short-max-age warning."""
+    text = _hsts_report(15_768_000, present=True)
+    assert "HSTS max-age is only" not in text
+
+
+def test_generate_report_no_hsts_warning_without_max_age_key() -> None:
+    """HSTS present but no hsts_max_age key (old-style result): no warning, plain [PRESENT]."""
+    text = _report(header_results={"present": ["Strict-Transport-Security"], "missing": []})
+    assert "[PRESENT] Strict-Transport-Security\n" in text
+    assert "HSTS max-age is only" not in text
 
 
 def test_generate_report_writes_checked_url() -> None:

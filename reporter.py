@@ -1,6 +1,7 @@
 import re
 from datetime import datetime
 
+from headers import HSTS_MIN_MAX_AGE
 from textsafe import clean_text
 
 # Plain-English reason for each cert_problem word from ssl_checker.
@@ -11,6 +12,24 @@ CERT_PROBLEM_TEXT = {
     "untrusted": "is not from a trusted issuer (self-signed or unknown)",
     "invalid": "failed verification",
 }
+
+def _https_failure_kind(header_results: dict) -> str:
+    """Plain words for why the HTTPS header check failed."""
+    if header_results.get("https_tls_problem"):
+        return "TLS problem"
+    if header_results.get("https_too_many_redirects"):
+        return "too many redirects"
+    return "could not connect"
+
+
+def _hsts_missing_reason(header: str, header_results: dict) -> str:
+    """Extra text for a [MISSING] HSTS line when the header was sent but doesn't count."""
+    if header != "Strict-Transport-Security" or "hsts_max_age" not in header_results:
+        return ""
+    if header_results["hsts_max_age"] == 0:
+        return " (sent with max-age=0, which switches HSTS off)"
+    return " (sent, but max-age is missing or unreadable, so browsers ignore it)"
+
 
 def generate_report(host, open_ports, header_results, redirect_results, ssl_results, address=None):
 
@@ -39,13 +58,18 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
 
         f.write("\nHTTP SECURITY HEADERS\n")
         f.write("-" * 20 + "\n")
-        if "error" in header_results:
+        if "error" in header_results and "https_error" in header_results:
+            f.write("Error fetching headers: HTTPS and HTTP both failed\n")
+            f.write(f"HTTPS ({_https_failure_kind(header_results)}): "
+                    f"{clean_text(header_results['https_error'])}\n")
+            f.write(f"HTTP: {clean_text(header_results['error'])}\n")
+        elif "error" in header_results:
             f.write(f"Error fetching headers: {clean_text(header_results['error'])}\n")
         else:
             if "url" in header_results:
                 f.write(f"Checked: {clean_text(header_results['url'])}\n")
             if "https_error" in header_results:
-                kind = "TLS problem" if header_results.get("https_tls_problem") else "could not connect"
+                kind = _https_failure_kind(header_results)
                 f.write(f"[WARNING] HTTPS attempt failed ({kind}) — fell back to http://\n")
                 f.write(f"Details: {clean_text(header_results['https_error'])}\n")
             if "downgraded_from" in header_results:
@@ -53,10 +77,16 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
                         f"({clean_text(header_results['downgraded_from'])} -> {clean_text(header_results['url'])})\n")
             if "offsite_redirect" in header_results:
                 f.write(f"[INFO] Redirect to another host not followed: {clean_text(header_results['offsite_redirect'])}\n")
+            max_age = header_results.get("hsts_max_age")
             for header in header_results["present"]:
                 f.write(f"[PRESENT] {header}\n")
+            if "Strict-Transport-Security" in header_results["present"] and max_age \
+                    and max_age < HSTS_MIN_MAX_AGE:
+                days = f" (about {max_age // 86400} days)" if max_age >= 86400 else ""
+                f.write(f"[WARNING] HSTS max-age is only {max_age} seconds{days}; "
+                        f"6 months or more is recommended\n")
             for header in header_results["missing"]:
-                f.write(f"[MISSING] {header}\n")
+                f.write(f"[MISSING] {header}{_hsts_missing_reason(header, header_results)}\n")
             for header in header_results.get("not_applicable", []):
                 f.write(f"[N/A] {header} (only counts over HTTPS)\n")
 
