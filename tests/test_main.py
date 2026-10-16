@@ -897,3 +897,57 @@ def test_main_debug_traceback_keeps_frame_indentation(
         _run(monkeypatch, "localhost", "--debug")
     err = capsys.readouterr().err
     assert any(line.startswith(DEBUG_PREFIX + "  File ") for line in err.splitlines())
+
+
+# --- The console itself goes away (output piped into a command that quit early) ------
+
+
+def _console_gone(monkeypatch: pytest.MonkeyPatch, from_line: str) -> MagicMock:
+    """From the first line starting with from_line on, every print fails like a closed pipe on Windows.
+
+    Returns the mocked _silence_stdout so a test can check it was called (the real one would
+    redirect the test process's own stdout).
+    """
+    real_print = builtins.print
+    gone = False
+
+    def fake_print(*args: object, **kwargs: object) -> None:
+        nonlocal gone
+        if args and str(args[0]).lstrip("\n").startswith(from_line):
+            gone = True
+        if gone:
+            raise OSError(22, "Invalid argument")
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr(main_module, "print", fake_print, raising=False)
+    silence = MagicMock()
+    monkeypatch.setattr(main_module, "_silence_stdout", silence)
+    return silence
+
+
+def test_main_console_gone_mid_scan_exits_5_without_crashing(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """A closed output pipe makes the exit-5 message fail too; that must not escape as a traceback (exit 1)."""
+    silence = _console_gone(monkeypatch, "[*] Checking security headers")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 5
+    silence.assert_called_once()
+
+
+def test_main_console_gone_with_debug_still_exits_5(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Same with --debug, where the check's own error message is the first print to fail."""
+    checks["check_ssl"].side_effect = ValueError("boom")
+    silence = _console_gone(monkeypatch, "[!] Internal error in")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost", "--debug")
+    assert exc.value.code == 5
+    silence.assert_called_once()
+
+
+def test_silence_stdout_ignores_streams_without_a_file(capsys: pytest.CaptureFixture[str]) -> None:
+    """Under capsys, stdout has no real file number; _silence_stdout must not raise."""
+    main_module._silence_stdout()

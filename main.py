@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import ipaddress
 import os
 import re
@@ -124,10 +125,13 @@ def main() -> None:
     except Exception as e:             # not BaseException: Ctrl+C and SystemExit pass through
         report = (f", but the report was already saved: {saved['report']}" if "report" in saved
                   else "; no report was written")
-        print(f"\n[!] Internal error: {_bug_detail(e)} — this is a bug in the scanner, "
-              f"please report it. The scan stopped{report}.")
-        if args.debug:
-            _print_traceback(e)
+        try:
+            print(f"\n[!] Internal error: {_bug_detail(e)} — this is a bug in the scanner, "
+                  f"please report it. The scan stopped{report}.")
+            if args.debug:
+                _print_traceback(e)
+        except OSError:                # the console itself is gone (e.g. output piped into `head`)
+            _silence_stdout()
         sys.exit(5)
     if had_internal_errors:
         sys.exit(3)                    # report written, but some checks hit a bug (see README table)
@@ -142,6 +146,17 @@ def _print_traceback(e: BaseException) -> None:
     for line in "".join(traceback.format_exception(e)).splitlines():
         indent = len(line) - len(line.lstrip(" "))
         print(f"[debug] {' ' * indent}{clean_text(line)}", file=sys.stderr)
+
+
+def _silence_stdout() -> None:
+    """Send further stdout output to nowhere once the reader has gone away.
+
+    Without this, Python's final flush at exit fails on the closed pipe again and prints
+    "Exception ignored ..." noise. (Python's docs recommend this for broken pipes.)
+    """
+    with contextlib.suppress(OSError, ValueError):     # e.g. no real file behind stdout
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
 
 
 def _bug_detail(e: Exception) -> str:
