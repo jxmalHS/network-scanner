@@ -63,7 +63,7 @@ def _hsts_missing_reason(header: str, header_results: dict) -> str:
 
 
 def generate_report(host, open_ports, header_results, redirect_results, ssl_results, address=None,
-                    internal_errors=None, note=None):
+                    internal_errors=None, note=None, addresses=None):
     """Write the report and return its filename. The file appears complete or not at all."""
     # e.g. "::1" -> "__1" (":" is illegal in Windows filenames); [:100] keeps long names under
     # Windows' 255-character filename limit.
@@ -72,7 +72,7 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
     tmp = filename + ".tmp"
     try:
         _write_report(tmp, host, open_ports, header_results, redirect_results, ssl_results, address,
-                      internal_errors or {}, note)
+                      internal_errors or {}, note, addresses)
         _replace_with_retry(tmp, filename)   # one atomic rename: never a half-written report
     except BaseException:              # includes Ctrl+C; always re-raised after cleaning up
         with contextlib.suppress(OSError):
@@ -106,12 +106,24 @@ def _internal_error_line(detail: str) -> str:
             "scanner, not a finding about the target — please report it.\n")
 
 
+def _port_line(entry: dict) -> str:
+    """One [OPEN] line. A banner of None means nothing was received; "" means nothing printable."""
+    if entry["banner"]:
+        return f"[OPEN] Port {entry['port']} — {entry['banner'][:100]}\n"
+    if entry["banner"] == "":
+        return f"[OPEN] Port {entry['port']} — (non-printable reply)\n"
+    return f"[OPEN] Port {entry['port']} — no banner\n"
+
+
 def _write_report(path, host, open_ports, header_results, redirect_results, ssl_results, address,
-                  internal_errors, note=None):
+                  internal_errors, note=None, addresses=None):
     """Write every report section to path."""
     with open(path, "w", encoding="utf-8") as f:
         f.write("Tamer - Network Vulnerability Scan Report\n")
-        target = host if address in (None, host) else f"{host} ({address})"
+        if addresses:                  # --dual-stack: both addresses that were port-scanned
+            target = f"{host} ({', '.join(addresses)})"
+        else:
+            target = host if address in (None, host) else f"{host} ({address})"
         f.write(f"Target: {target}\n")
         if note:                       # our own wording (no server text), e.g. what --ipv6 steered
             f.write(f"{note}\n")
@@ -122,17 +134,13 @@ def _write_report(path, host, open_ports, header_results, redirect_results, ssl_
         f.write("-" * 20 + "\n")
         if "ports" in internal_errors:
             f.write(_internal_error_line(internal_errors["ports"]))
+        elif addresses:                # grouped per address, so "nothing open on IPv6" is explicit
+            for addr in addresses:
+                f.write(f"{addr} ({'IPv6' if ':' in addr else 'IPv4'}):\n")
+                found = [e for e in open_ports or [] if e.get("address") == addr]
+                f.write("".join(_port_line(e) for e in found) or "No open ports found.\n")
         else:
-            if open_ports:
-                for entry in open_ports:
-                    if entry["banner"]:
-                        f.write(f"[OPEN] Port {entry['port']} — {entry['banner'][:100]}\n")
-                    elif entry["banner"] == "":
-                        f.write(f"[OPEN] Port {entry['port']} — (non-printable reply)\n")
-                    else:
-                        f.write(f"[OPEN] Port {entry['port']} — no banner\n")
-            else:
-                f.write("No open ports found.\n")
+            f.write("".join(_port_line(e) for e in open_ports or []) or "No open ports found.\n")
 
         f.write("\nHTTP SECURITY HEADERS\n")
         f.write("-" * 20 + "\n")

@@ -617,3 +617,78 @@ def test_resolve_host_default_still_prefers_ipv4() -> None:
     with patch("scanner.socket.getaddrinfo", return_value=entries):
         assert scanner.resolve_host("localhost") == (socket.AF_INET, "127.0.0.1")
         assert scanner.resolve_host("localhost", ipv6=False) == (socket.AF_INET, "127.0.0.1")
+
+
+# --- resolve_dual: one IPv4 and one IPv6 address for --dual-stack -------------
+
+DUAL_PAIR = [(socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")]
+
+
+@pytest.mark.parametrize("ipv6_first", [True, False])
+def test_resolve_dual_returns_ipv4_then_ipv6_whatever_the_dns_order(ipv6_first: bool) -> None:
+    """The pair is always [IPv4, IPv6], even when DNS lists ::1 first (as Windows does)."""
+    v4, v6 = _addrinfo(socket.AF_INET, "127.0.0.1"), _addrinfo(socket.AF_INET6, "::1")
+    entries = [v6, v4] if ipv6_first else [v4, v6]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_dual("localhost") == DUAL_PAIR
+
+
+def test_resolve_dual_picks_first_address_of_each_family() -> None:
+    """With several addresses per family, the first of each (in DNS order) is used."""
+    entries = [_addrinfo(socket.AF_INET, "192.0.2.1"), _addrinfo(socket.AF_INET6, "2001:db8::1"),
+               _addrinfo(socket.AF_INET, "192.0.2.2"), _addrinfo(socket.AF_INET6, "2001:db8::2")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_dual("multi.example") == [
+            (socket.AF_INET, "192.0.2.1"), (socket.AF_INET6, "2001:db8::1")]
+
+
+def test_resolve_dual_skips_link_local_ipv6() -> None:
+    """A fe80:: entry listed first is skipped; the global IPv6 address is used instead."""
+    entries = [_addrinfo(socket.AF_INET6, "fe80::1"), _addrinfo(socket.AF_INET, "192.0.2.1"),
+               _addrinfo(socket.AF_INET6, "2001:db8::1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_dual("mixed.example") == [
+            (socket.AF_INET, "192.0.2.1"), (socket.AF_INET6, "2001:db8::1")]
+
+
+def test_resolve_dual_only_link_local_ipv6_counts_as_no_ipv6() -> None:
+    """IPv4 plus only fe80:: IPv6 raises the 'no IPv6' error rather than scanning fe80::."""
+    entries = [_addrinfo(socket.AF_INET, "192.0.2.1"), _addrinfo(socket.AF_INET6, "fe80::1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        with pytest.raises(scanner.HostResolutionError, match=r"no IPv6 address"):
+            scanner.resolve_dual("mixed.example")
+
+
+def test_resolve_dual_ipv4_only_name_raises_naming_ipv6() -> None:
+    """A name with only IPv4 raises the full 'both IPv4 and IPv6 ... no IPv6' sentence."""
+    entries = [_addrinfo(socket.AF_INET, "192.0.2.1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        with pytest.raises(scanner.HostResolutionError) as exc:
+            scanner.resolve_dual("v4only.example")
+    assert str(exc.value) == ("Can't scan v4only.example over both IPv4 and IPv6: "
+                              "it has no IPv6 address that can be scanned")
+
+
+def test_resolve_dual_ipv6_only_name_raises_naming_ipv4() -> None:
+    """A name with only IPv6 raises the error that names the missing IPv4."""
+    entries = [_addrinfo(socket.AF_INET6, "2001:db8::1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        with pytest.raises(scanner.HostResolutionError) as exc:
+            scanner.resolve_dual("v6only.example")
+    assert str(exc.value) == ("Can't scan v6only.example over both IPv4 and IPv6: "
+                              "it has no IPv4 address that can be scanned")
+
+
+def test_resolve_dual_looks_the_name_up_exactly_once() -> None:
+    """Both addresses come from a single getaddrinfo() call (no second lookup per family)."""
+    entries = [_addrinfo(socket.AF_INET6, "::1"), _addrinfo(socket.AF_INET, "127.0.0.1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries) as fake_dns:
+        scanner.resolve_dual("localhost")
+    fake_dns.assert_called_once_with("localhost", None, type=socket.SOCK_STREAM)
+
+
+def test_resolve_dual_unresolvable_name_raises_could_not_resolve() -> None:
+    """A failed lookup gives the usual 'Could not resolve host' error."""
+    with patch("scanner.socket.getaddrinfo", side_effect=socket.gaierror(11001, "failed")):
+        with pytest.raises(scanner.HostResolutionError, match=r"^Could not resolve host: nope\.invalid"):
+            scanner.resolve_dual("nope.invalid")

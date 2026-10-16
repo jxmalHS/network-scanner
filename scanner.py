@@ -39,6 +39,19 @@ def _usable_addresses(host: str) -> list[tuple[int, str]]:
     return usable
 
 
+def resolve_dual(host: str) -> list[tuple[int, str]]:
+    """[(AF_INET, IPv4), (AF_INET6, IPv6)] from one lookup; an error names a missing kind."""
+    addresses = _usable_addresses(host)
+    pair = []
+    for family, name in ((socket.AF_INET, "IPv4"), (socket.AF_INET6, "IPv6")):
+        found = [a for a in addresses if a[0] == family]
+        if not found:
+            raise HostResolutionError(
+                f"Can't scan {host} over both IPv4 and IPv6: it has no {name} address that can be scanned")
+        pair.append(found[0])
+    return pair
+
+
 def resolve_host(host: str, ipv6: bool = False) -> tuple[int, str]:
     """Return (address family, IP) for host. IP addresses skip the DNS lookup.
 

@@ -178,6 +178,134 @@ def test_generate_report_no_open_ports() -> None:
     assert "No open ports found.\n" in _report(open_ports=[])
 
 
+# --- --dual-stack: OPEN PORTS grouped per address ---------------------------
+
+DUAL_ADDRESSES = ["127.0.0.1", "::1"]
+
+
+def _ports_section(text: str) -> str:
+    """Just the body of the OPEN PORTS section (after its dashes, up to the blank line)."""
+    start = text.index("OPEN PORTS\n" + "-" * 20 + "\n") + len("OPEN PORTS\n" + "-" * 20 + "\n")
+    return text[start:text.index("\nHTTP SECURITY HEADERS\n", start)]
+
+
+def _dual_report(open_ports: list[dict[str, Any]] | None, **kwargs: Any) -> str:
+    """A report for localhost written the way --dual-stack calls generate_report."""
+    filename = reporter.generate_report("localhost", open_ports, NO_HEADERS, _redirects(), VALID_SSL,
+                                        address=None, addresses=DUAL_ADDRESSES, **kwargs)
+    return Path(filename).read_text(encoding="utf-8")
+
+
+def test_generate_report_dual_target_lists_both_addresses(in_tmp_dir: Path) -> None:
+    """With addresses set, the Target line shows the host and both scanned addresses."""
+    assert (_target_line(in_tmp_dir, "localhost", addresses=DUAL_ADDRESSES)
+            == "Target: localhost (127.0.0.1, ::1)")
+
+
+def test_generate_report_dual_ports_on_ipv4_only() -> None:
+    """Ports found only on IPv4: the IPv4 group lists them, the IPv6 group says none were found."""
+    text = _dual_report([{"port": 80, "banner": None, "address": "127.0.0.1"}])
+    assert _ports_section(text) == (
+        "127.0.0.1 (IPv4):\n"
+        "[OPEN] Port 80 — no banner\n"
+        "::1 (IPv6):\n"
+        "No open ports found.\n"
+    )
+
+
+def test_generate_report_dual_ports_on_ipv6_only() -> None:
+    """Ports found only on IPv6: the IPv4 group says none were found."""
+    text = _dual_report([{"port": 22, "banner": None, "address": "::1"}])
+    assert _ports_section(text) == (
+        "127.0.0.1 (IPv4):\n"
+        "No open ports found.\n"
+        "::1 (IPv6):\n"
+        "[OPEN] Port 22 — no banner\n"
+    )
+
+
+def test_generate_report_dual_ports_on_both_addresses() -> None:
+    """Each group lists only its own ports, in the order they were given."""
+    text = _dual_report([
+        {"port": 22, "banner": None, "address": "127.0.0.1"},
+        {"port": 80, "banner": None, "address": "127.0.0.1"},
+        {"port": 80, "banner": None, "address": "::1"},
+    ])
+    assert _ports_section(text) == (
+        "127.0.0.1 (IPv4):\n"
+        "[OPEN] Port 22 — no banner\n"
+        "[OPEN] Port 80 — no banner\n"
+        "::1 (IPv6):\n"
+        "[OPEN] Port 80 — no banner\n"
+    )
+
+
+def test_generate_report_dual_no_ports_on_either_address() -> None:
+    """Nothing open anywhere: each group gets its own 'No open ports found.' line (two in total)."""
+    text = _dual_report([])
+    assert _ports_section(text) == (
+        "127.0.0.1 (IPv4):\n"
+        "No open ports found.\n"
+        "::1 (IPv6):\n"
+        "No open ports found.\n"
+    )
+    assert text.count("No open ports found.") == 2
+
+
+def test_generate_report_dual_banner_variants_inside_groups() -> None:
+    """Banner text, None ('no banner') and '' ('non-printable reply') all work inside a group,
+    and long banners are still cut to 100 characters."""
+    text = _dual_report([
+        {"port": 80, "banner": "A" * 150, "address": "127.0.0.1"},
+        {"port": 22, "banner": None, "address": "::1"},
+        {"port": 23, "banner": "", "address": "::1"},
+    ])
+    assert _ports_section(text) == (
+        "127.0.0.1 (IPv4):\n"
+        f"[OPEN] Port 80 — {'A' * 100}\n"
+        "::1 (IPv6):\n"
+        "[OPEN] Port 22 — no banner\n"
+        "[OPEN] Port 23 — (non-printable reply)\n"
+    )
+
+
+def test_generate_report_dual_internal_error_is_a_single_line() -> None:
+    """A crashed dual port scan gives the one [INTERNAL ERROR] line, with no per-address groups."""
+    text = _dual_report(None, internal_errors={"ports": "RuntimeError: bug"})
+    section = _ports_section(text)
+    assert section.startswith("[INTERNAL ERROR] Check did not run: RuntimeError: bug.")
+    assert section.count("\n") == 1
+    assert "(IPv4):" not in text
+    assert "(IPv6):" not in text
+
+
+@pytest.mark.parametrize("open_ports, expected", [
+    ([], "No open ports found.\n"),
+    ([{"port": 22, "banner": "SSH-2.0"}, {"port": 80, "banner": None}, {"port": 443, "banner": ""}],
+     "[OPEN] Port 22 — SSH-2.0\n[OPEN] Port 80 — no banner\n[OPEN] Port 443 — (non-printable reply)\n"),
+])
+def test_generate_report_without_addresses_ports_section_is_unchanged(
+    open_ports: list[dict[str, Any]], expected: str
+) -> None:
+    """addresses=None keeps the old, ungrouped layout byte-for-byte."""
+    filename = reporter.generate_report("localhost", open_ports, NO_HEADERS, _redirects(), VALID_SSL,
+                                        address="127.0.0.1", addresses=None)
+    text = Path(filename).read_text(encoding="utf-8")
+    assert _ports_section(text) == expected
+    assert "(IPv4):" not in text
+
+
+def test_generate_report_addresses_none_matches_omitting_it() -> None:
+    """Passing addresses=None writes exactly the same file as not passing it (Date line aside)."""
+    ports = [{"port": 22, "banner": "SSH-2.0"}, {"port": 80, "banner": None}]
+    plain = Path(reporter.generate_report("localhost", ports, NO_HEADERS, _redirects(), VALID_SSL,
+                                          address="127.0.0.1")).read_text(encoding="utf-8")
+    with_arg = Path(reporter.generate_report("localhost", ports, NO_HEADERS, _redirects(), VALID_SSL,
+                                             address="127.0.0.1", addresses=None)).read_text(encoding="utf-8")
+    strip_date = lambda t: "\n".join(l for l in t.splitlines() if not l.startswith("Date:"))
+    assert strip_date(with_arg) == strip_date(plain)
+
+
 def test_generate_report_lists_present_and_missing_headers() -> None:
     """Present headers get [PRESENT], missing ones get [MISSING]."""
     text = _report(header_results={"present": ["X-Frame-Options"], "missing": ["Strict-Transport-Security"]})

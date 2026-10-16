@@ -6,7 +6,8 @@ import re
 import signal
 import sys
 import traceback
-from scanner import DEFAULT_WORKERS, HostResolutionError, is_unscannable, resolve_host, scan_ports
+from scanner import (DEFAULT_WORKERS, HostResolutionError, is_unscannable, resolve_dual, resolve_host,
+                     scan_ports)
 from headers import check_headers
 from reporter import generate_report
 from redirects import check_open_redirect
@@ -109,11 +110,16 @@ def main() -> None:
                         help=f"Ports to check at the same time (1-{MAX_WORKERS}, default {DEFAULT_WORKERS})")
     parser.add_argument("--debug", action="store_true",
                         help="On an internal error, also print the full Python traceback (for bug reports)")
-    parser.add_argument("--ipv6", action="store_true",
+    family = parser.add_mutually_exclusive_group()      # using both exits 2
+    family.add_argument("--ipv6", action="store_true",
                         help="Port-scan the host's IPv6 address instead of its IPv4 one (stops if it has none)")
+    family.add_argument("--dual-stack", action="store_true",
+                        help="Port-scan both the IPv4 and the IPv6 address (twice the connection attempts)")
     args = parser.parse_args()
     if args.ipv6 and _ip_version(args.host) == 4:
         parser.error(f"--ipv6 can't be used with an IPv4 address: {args.host}")   # exits 2
+    if args.dual_stack and _ip_version(args.host) is not None:
+        parser.error(f"--dual-stack needs a host name; an IP address is only one address: {args.host}")
 
     saved: dict[str, str] = {}          # run_scan fills in "report" once the file is on disk
     try:
@@ -198,6 +204,13 @@ def _run_check(label: str, key: str, errors: dict[str, str], func, *args, debug:
         return None
 
 
+def _scan_each_address(addresses: list[str], ports: list[int], workers: int) -> list[dict]:
+    """Port-scan each address in turn (so at most `workers` connections at once, as usual),
+    tagging every open port with the address it was found on."""
+    return [{**entry, "address": address}
+            for address in addresses for entry in scan_ports(address, ports, workers)]
+
+
 def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
     """Run every check in order and write the report. True if any check hit an internal error.
 
@@ -210,28 +223,42 @@ def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
 
     # Look the name up once (raises HostResolutionError), so the port scan and the report
     # both use the same address. The other checks keep the name: TLS needs it.
-    _, address = resolve_host(host, ipv6=args.ipv6)
-    target = host if address == host else f"{host} ({address})"
-    # With --ipv6 only the port scan is steered; say so, so the Target line can't mislead.
-    # Not for IP literals (even long forms like 0:0:0:0:0:0:0:1): every check uses that address.
-    note = (f"Note: only the port scan used {address}; the header, redirect and SSL checks "
+    if args.dual_stack:
+        address = None
+        dual = [ip for _, ip in resolve_dual(host)]      # [IPv4, IPv6]
+        target = f"{host} ({', '.join(dual)})"
+        used = "both addresses"
+    else:
+        dual = None
+        _, address = resolve_host(host, ipv6=args.ipv6)
+        target = host if address == host else f"{host} ({address})"
+        used = address
+    # With --ipv6/--dual-stack only the port scan is steered; say so, so the Target line can't
+    # mislead. Not for IP literals (even long forms like 0:0:0:0:0:0:0:1): every check uses that address.
+    note = (f"Note: only the port scan used {used}; the header, redirect and SSL checks "
             f"connect by name and the system picks the address."
-            if args.ipv6 and _ip_version(host) is None else None)
+            if (args.ipv6 or args.dual_stack) and _ip_version(host) is None else None)
 
     print(f"\n[*] Starting scan on {target}")
     if note:
         print(f"[*] {note}")
 
-    print(f"[*] Scanning {len(ports)} ports ({args.workers} at a time)...")
-    open_ports = _run_check("the port scan", "ports", errors, scan_ports, address, ports, args.workers,
-                            debug=args.debug)
+    each = " on each address" if dual else ""
+    print(f"[*] Scanning {len(ports)} ports{each} ({args.workers} at a time)...")
+    if dual:
+        open_ports = _run_check("the port scan", "ports", errors, _scan_each_address, dual, ports,
+                                args.workers, debug=args.debug)
+    else:
+        open_ports = _run_check("the port scan", "ports", errors, scan_ports, address, ports,
+                                args.workers, debug=args.debug)
     for entry in open_ports or []:
+        where = f" on {entry['address']}" if "address" in entry else ""   # our own resolver's text
         if entry["banner"]:
-            print(f"[+] Port {entry['port']} open — {entry['banner'][:50]}")
+            print(f"[+] Port {entry['port']} open{where} — {entry['banner'][:50]}")
         elif entry["banner"] == "":
-            print(f"[+] Port {entry['port']} open — (non-printable reply)")
+            print(f"[+] Port {entry['port']} open{where} — (non-printable reply)")
         else:
-            print(f"[+] Port {entry['port']} open — no banner")
+            print(f"[+] Port {entry['port']} open{where} — no banner")
 
     print("[*] Checking security headers...")
     header_results = _run_check("the header check", "headers", errors, check_headers, host,
@@ -251,7 +278,8 @@ def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
     print("[*] Generating report...")
     try:
         filename = generate_report(host, open_ports, header_results, redirect_results, ssl_results,
-                                   address=address, internal_errors=errors, note=note)
+                                   address=address, internal_errors=errors, note=note,
+                                   addresses=dual)
     except OSError as e:               # PermissionError after the retries, disk full, ...
         raise ReportSaveError(clean_text(str(e))) from e
     saved["report"] = filename         # before any print: Ctrl+C can land from here on

@@ -80,6 +80,19 @@ python main.py localhost --ipv6
 
 If the name has no IPv6 address, the scan stops with exit code 1 rather than quietly using IPv4.
 `--ipv6` with an IPv4 address (e.g. `python main.py 127.0.0.1 --ipv6`) is refused (exit code 2).
+Your own machine needs working IPv6 too: without it every port fails to connect and looks closed.
+
+To port-scan **both** addresses, use `--dual-stack`. Open ports are listed per address in the
+report, which shows when a firewall treats IPv4 and IPv6 differently:
+
+```powershell
+python main.py scanme.nmap.org --dual-stack
+```
+
+It sends twice as many connection attempts (each port is tried on both addresses), so it's off by
+default. It needs a host name with both an IPv4 and an IPv6 address (otherwise exit code 1), and it
+can't be combined with `--ipv6` or used with an IP address (exit code 2). Only scan names you're
+allowed to test: in rare setups a name's IPv6 address is a different machine (e.g. a CDN).
 
 The header, redirect and certificate checks always connect by name, so your operating system picks
 which address they use, with or without `--ipv6`; the report says so when `--ipv6` is used. To make
@@ -95,8 +108,8 @@ printers and similar devices), the scan stops with exit code 1.
 | Code | Meaning |
 |---|---|
 | 0 | Scan finished and the report was written (also `--help`, which scans nothing) |
-| 1 | The host name could not be resolved, or it has no address that can be scanned, or `--ipv6` was used and it has no IPv6 address (no report written) |
-| 2 | Bad arguments, e.g. an invalid host, port or `--workers` value (nothing scanned) |
+| 1 | The host name could not be resolved, or it has no address that can be scanned, or `--ipv6`/`--dual-stack` was used and it lacks the address needed (no report written) |
+| 2 | Bad arguments, e.g. an invalid host, port or `--workers` value, or `--ipv6` with `--dual-stack` (nothing scanned) |
 | 3 | Internal error: a bug in the scanner stopped one or more checks. The report was still written, but those sections are incomplete. Run again with `--debug` to see the full error |
 | 4 | The report could not be saved (for example the folder isn't writable or the disk is full). The results were only shown on screen |
 | 5 | Scanner bug outside the checks: the scan stopped. The console says what went wrong and whether a report was saved; please report it. Also used, silently, if the console output itself breaks (e.g. the output was piped into a command that stopped reading early) |

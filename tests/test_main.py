@@ -137,7 +137,7 @@ def test_main_passes_all_results_to_reporter(monkeypatch: pytest.MonkeyPatch, ch
     _run(monkeypatch, "localhost")
     checks["generate_report"].assert_called_once_with(
         "localhost", [], {"present": [], "missing": []}, REDIRECT_RESULTS, {"error": "refused"},
-        address="127.0.0.1", internal_errors={}, note=None,
+        address="127.0.0.1", internal_errors={}, note=None, addresses=None,
     )
 
 
@@ -1080,6 +1080,203 @@ def test_main_console_gone_with_debug_still_exits_5(
         _run(monkeypatch, "localhost", "--debug")
     assert exc.value.code == 5
     silence.assert_called_once()
+
+
+# --- --dual-stack: port-scan both the IPv4 and the IPv6 address ----------------
+
+DUAL = [(socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")]
+DUAL_NOTE = ("Note: only the port scan used both addresses; the header, redirect and SSL checks "
+             "connect by name and the system picks the address.")
+
+
+@pytest.fixture
+def resolve_dual() -> Iterator[MagicMock]:
+    """Replace main.resolve_dual with a mock returning localhost's [IPv4, IPv6] pair."""
+    with patch("main.resolve_dual", return_value=list(DUAL)) as fake:
+        yield fake
+
+
+def test_main_dual_stack_scans_ipv4_then_ipv6_with_same_workers(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], resolve_dual: MagicMock
+) -> None:
+    """--dual-stack calls scan_ports twice, IPv4 first then IPv6, with the same port list and workers."""
+    _run(monkeypatch, "--dual-stack", "localhost", "--workers", "7")
+    resolve_dual.assert_called_once_with("localhost")
+    checks["resolve_host"].assert_not_called()
+    assert [c.args for c in checks["scan_ports"].call_args_list] == [
+        ("127.0.0.1", main_module.COMMON_PORTS, 7), ("::1", main_module.COMMON_PORTS, 7)]
+
+
+def test_main_dual_stack_tags_each_open_port_with_its_address(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], resolve_dual: MagicMock
+) -> None:
+    """Every entry handed to the reporter carries the address it was found on, in scan order."""
+    checks["scan_ports"].side_effect = [[{"port": 80, "banner": None}], [{"port": 22, "banner": "SSH"}]]
+    _run(monkeypatch, "--dual-stack", "localhost")
+    assert checks["generate_report"].call_args.args[1] == [
+        {"port": 80, "banner": None, "address": "127.0.0.1"},
+        {"port": 22, "banner": "SSH", "address": "::1"},
+    ]
+
+
+def test_main_dual_stack_passes_addresses_not_address_to_reporter(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], resolve_dual: MagicMock
+) -> None:
+    """generate_report gets address=None, addresses=[IPv4, IPv6] and the 'both addresses' note."""
+    _run(monkeypatch, "--dual-stack", "localhost")
+    kwargs = checks["generate_report"].call_args.kwargs
+    assert kwargs["address"] is None
+    assert kwargs["addresses"] == ["127.0.0.1", "::1"]
+    assert kwargs["note"] == DUAL_NOTE
+
+
+def test_main_dual_stack_starting_line_shows_both_addresses_then_note(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock],
+    resolve_dual: MagicMock
+) -> None:
+    """The console shows 'Starting scan on localhost (127.0.0.1, ::1)' followed by the note."""
+    _run(monkeypatch, "--dual-stack", "localhost")
+    assert f"[*] Starting scan on localhost (127.0.0.1, ::1)\n[*] {DUAL_NOTE}\n" in capsys.readouterr().out
+
+
+def test_main_dual_stack_says_ports_are_scanned_on_each_address(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock],
+    resolve_dual: MagicMock
+) -> None:
+    """The progress line says the port count applies to each address."""
+    _run(monkeypatch, "--dual-stack", "localhost", "--ports", "22", "80")
+    assert "[*] Scanning 2 ports on each address (20 at a time)...\n" in capsys.readouterr().out
+
+
+def test_main_dual_stack_console_names_the_address_of_each_open_port(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock],
+    resolve_dual: MagicMock
+) -> None:
+    """Each '[+] Port P open' line says which address it was open on, for all three banner kinds."""
+    checks["scan_ports"].side_effect = [[{"port": 80, "banner": "Apache"}],
+                                        [{"port": 22, "banner": None}, {"port": 23, "banner": ""}]]
+    _run(monkeypatch, "--dual-stack", "localhost")
+    out = capsys.readouterr().out
+    assert "[+] Port 80 open on 127.0.0.1 — Apache\n" in out
+    assert "[+] Port 22 open on ::1 — no banner\n" in out
+    assert "[+] Port 23 open on ::1 — (non-printable reply)\n" in out
+
+
+def test_main_without_dual_stack_console_line_has_no_address(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """In the normal mode the console line is unchanged: no ' on <address>' part."""
+    checks["scan_ports"].return_value = [{"port": 80, "banner": None}]
+    _run(monkeypatch, "localhost")
+    out = capsys.readouterr().out
+    assert "[+] Port 80 open — no banner\n" in out
+    assert "on each address" not in out
+
+
+def test_main_dual_stack_still_runs_other_checks_by_name(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], resolve_dual: MagicMock
+) -> None:
+    """--dual-stack steers only the port scan: the other checks still get the host name."""
+    _run(monkeypatch, "--dual-stack", "localhost")
+    checks["check_headers"].assert_called_once_with("localhost")
+    checks["check_open_redirect"].assert_called_once_with("localhost")
+    checks["check_ssl"].assert_called_once_with("localhost")
+
+
+def test_main_dual_stack_and_ipv6_together_exit_2(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock],
+    resolve_dual: MagicMock
+) -> None:
+    """--dual-stack and --ipv6 are mutually exclusive: argparse exits 2 before any lookup."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--dual-stack", "--ipv6", "localhost")
+    assert exc.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+    resolve_dual.assert_not_called()
+    checks["resolve_host"].assert_not_called()
+
+
+@pytest.mark.parametrize("literal", ["127.0.0.1", "::1"])
+def test_main_dual_stack_with_ip_literal_exits_2_without_lookup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock],
+    resolve_dual: MagicMock, literal: str
+) -> None:
+    """An IP address is only one address, so --dual-stack with it is an argument error (exit 2)."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--dual-stack", literal)
+    assert exc.value.code == 2
+    assert "--dual-stack needs a host name" in capsys.readouterr().err
+    resolve_dual.assert_not_called()
+    checks["resolve_host"].assert_not_called()
+    checks["scan_ports"].assert_not_called()
+
+
+def test_main_dual_stack_resolution_error_exits_1_with_message(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock],
+    resolve_dual: MagicMock
+) -> None:
+    """resolve_dual raising HostResolutionError exits 1, prints the sentence, and runs nothing else."""
+    message = ("Can't scan v4only.example over both IPv4 and IPv6: "
+               "it has no IPv6 address that can be scanned")
+    resolve_dual.side_effect = main_module.HostResolutionError(message)
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--dual-stack", "v4only.example")
+    assert exc.value.code == 1
+    assert f"\n[!] {message}\n" in capsys.readouterr().out
+    for name in ("scan_ports", "check_headers", "check_open_redirect", "check_ssl", "generate_report"):
+        checks[name].assert_not_called()
+
+
+def test_main_dual_stack_bug_in_second_scan_is_a_ports_internal_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock],
+    resolve_dual: MagicMock
+) -> None:
+    """A bug while scanning ::1 becomes a 'ports' internal error; the other checks run; exit 3."""
+    checks["scan_ports"].side_effect = [[{"port": 80, "banner": None}], RuntimeError("bug")]
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--dual-stack", "localhost")
+    assert exc.value.code == 3
+    for name in ("check_headers", "check_open_redirect", "check_ssl"):
+        checks[name].assert_called_once()
+    call = checks["generate_report"].call_args
+    assert call.args[1] is None                               # no half-finished port list
+    assert "RuntimeError: bug" in call.kwargs["internal_errors"]["ports"]
+    assert "[!] Internal error in the port scan: RuntimeError: bug" in capsys.readouterr().out
+
+
+def test_main_dual_stack_ctrl_c_in_second_scan_exits_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock],
+    resolve_dual: MagicMock
+) -> None:
+    """Ctrl+C while scanning the IPv6 address aborts cleanly: exit 130, no other checks, no report."""
+    checks["scan_ports"].side_effect = [[], KeyboardInterrupt]
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--dual-stack", "localhost")
+    assert exc.value.code == 130
+    assert ABORT_MESSAGE in capsys.readouterr().out
+    for name in ("check_headers", "check_open_redirect", "check_ssl", "generate_report"):
+        checks[name].assert_not_called()
+
+
+def test_main_without_dual_stack_never_calls_resolve_dual(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], resolve_dual: MagicMock
+) -> None:
+    """The default mode (and --ipv6) use resolve_host only."""
+    _run(monkeypatch, "localhost")
+    checks["resolve_host"].return_value = (socket.AF_INET6, "::1")
+    _run(monkeypatch, "--ipv6", "localhost")
+    resolve_dual.assert_not_called()
+    assert checks["resolve_host"].call_count == 2
+
+
+def test_main_help_mentions_dual_stack(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """--help lists the --dual-stack option."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--help")
+    assert exc.value.code == 0
+    assert "--dual-stack" in capsys.readouterr().out
 
 
 def test_silence_stdout_ignores_streams_without_a_file(capsys: pytest.CaptureFixture[str]) -> None:
