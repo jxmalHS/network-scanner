@@ -81,7 +81,7 @@ def _write_report(path, host, open_ports, header_results, redirect_results, ssl_
                   internal_errors):
     """Write every report section to path."""
     with open(path, "w", encoding="utf-8") as f:
-        f.write("Tamer Network Vulnerability Scan Report\n")
+        f.write("Tamer - Network Vulnerability Scan Report\n")
         target = host if address in (None, host) else f"{host} ({address})"
         f.write(f"Target: {target}\n")
         f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
