@@ -23,45 +23,49 @@ HSTS_MIN_MAX_AGE = 15_768_000
 HSTS_PRELOAD_MIN_MAX_AGE = 31_536_000
 
 
+def _hsts_directives(value: str) -> list[tuple[str, str]]:
+    """(lower-cased name, raw value) for each directive in the first HSTS header, in order.
+
+    Browsers only use the first HSTS header; requests joins repeated headers with ", ",
+    so only the part before the first comma counts (RFC 6797 section 8.1).
+    """
+    first = value.split(",", 1)[0]
+    directives = []
+    for part in first.split(";"):
+        if not part.strip():
+            continue
+        name, _, raw = part.strip().partition("=")
+        directives.append((name.strip().lower(), raw))
+    return directives
+
+
 def _hsts_directive_names(value: str) -> set[str]:
-    """Lower-cased directive names in the first HSTS header (split like _hsts_max_age).
+    """Lower-cased directive names in the first HSTS header (see _hsts_directives).
 
     Names are tokens in RFC 6797 (only values may be quoted), so '"preload"' is not preload.
     A value after a name ('preload=yes') is ignored; only the name counts.
     """
-    first = value.split(",", 1)[0]
-    return {part.partition("=")[0].strip().lower() for part in first.split(";") if part.strip()}
+    return {name for name, _ in _hsts_directives(value)}
 
 
 def _hsts_max_age(value: str) -> int | None:
     """The max-age (seconds) of an HSTS header, or None if it's missing or unreadable.
-
-    Browsers only use the first HSTS header; requests joins repeated headers with ", ",
-    so only the part before the first comma counts (RFC 6797 section 8.1).
 
     Known limit (accepted): a quoted directive value containing a comma *before* max-age,
     e.g. 'foo="a,b"; max-age=31536000', cuts the header short and reads as unreadable,
     so HSTS is reported MISSING ("unreadable"). Real servers don't send this, the result
     errs on the cautious side, and requests' ", " joining makes an exact split impossible.
     """
-    first = value.split(",", 1)[0]
-    names, ages = [], []
-    for part in first.split(";"):
-        if not part.strip():
-            continue
-        name, _, raw = part.strip().partition("=")
-        name = name.strip().lower()
-        names.append(name)
-        if name == "max-age":
-            raw = raw.strip()
-            if len(raw) >= 2 and raw[0] == raw[-1] == '"':   # one matching pair of quotes only
-                raw = raw[1:-1]
-            ages.append(raw)
+    directives = _hsts_directives(value)
+    names = [name for name, _ in directives]
     if len(names) != len(set(names)):   # any directive repeated: the whole header is invalid
         return None
+    ages = [raw.strip() for name, raw in directives if name == "max-age"]
     if len(ages) != 1:                  # no max-age at all
         return None
     age = ages[0]
+    if len(age) >= 2 and age[0] == age[-1] == '"':   # one matching pair of quotes only
+        age = age[1:-1]
     if not (age.isascii() and age.isdigit()):
         return None
     try:
