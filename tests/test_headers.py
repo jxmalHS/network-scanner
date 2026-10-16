@@ -337,7 +337,7 @@ def test_fetch_error_during_redirect_hop_returns_error() -> None:
     hop = _response({}, location="/home")
     with patch("headers.requests.get", side_effect=[hop, requests.exceptions.Timeout("timed out")]):
         result = headers._fetch("https://example.com")
-    assert result == {"error": "timed out"}
+    assert result == {"error": "timed out", "timed_out": True}
 
 
 def test_fetch_garbled_location_returns_error() -> None:
@@ -484,7 +484,10 @@ def test_check_headers_both_time_out_returns_error_not_exception() -> None:
     """Timeouts on both attempts become an error dict instead of crashing."""
     with patch("headers.requests.get", side_effect=requests.exceptions.Timeout("timed out")):
         result = headers.check_headers("example.com")
-    assert result == {"error": "timed out", "https_error": "timed out"}
+    assert result == {
+        "error": "timed out", "timed_out": True,               # the HTTP attempt's own result
+        "https_error": "timed out", "https_timed_out": True,   # copied over from the HTTPS attempt
+    }
 
 
 # --- HSTS max-age judging ----------------------------------------------------
@@ -600,3 +603,97 @@ def test_hsts_max_age_quoted_comma_limit_is_documented() -> None:
     """Documented limit: a quoted comma BEFORE max-age reads as unreadable; AFTER it is harmless."""
     assert headers._hsts_max_age('foo="a,b"; max-age=31536000') is None
     assert headers._hsts_max_age('max-age=31536000; foo="a,b"') == 31536000
+
+
+# --- timeouts get their own flag ---------------------------------------------
+
+def test_timeout_constant_is_five_seconds() -> None:
+    """The per-request timeout is pinned at 5 seconds (the report text relies on it)."""
+    assert headers.TIMEOUT == 5
+
+
+def test_fetch_passes_timeout_constant_to_requests_get(monkeypatch: pytest.MonkeyPatch) -> None:
+    """requests.get gets timeout=headers.TIMEOUT, not a hard-coded number.
+
+    TIMEOUT is changed to 7 for this test, so a leftover literal 5 would be caught.
+    """
+    monkeypatch.setattr(headers, "TIMEOUT", 7)
+    with patch("headers.requests.get", return_value=_response({})) as fake_get:
+        headers._fetch("https://example.com")
+    fake_get.assert_called_once_with(
+        "https://example.com", timeout=7, allow_redirects=False, stream=True,
+    )
+
+
+@pytest.mark.parametrize("exc_type", [
+    pytest.param(requests.exceptions.ConnectTimeout, id="connect_timeout"),
+    pytest.param(requests.exceptions.ReadTimeout, id="read_timeout"),
+])
+def test_fetch_timeout_sets_timed_out(exc_type: type[Exception]) -> None:
+    """Both kinds of timeout come back as an error dict with timed_out True."""
+    with patch("headers.requests.get", side_effect=exc_type("no answer")):
+        result = headers._fetch("https://example.com")
+    assert result == {"error": "no answer", "timed_out": True}
+
+
+def test_fetch_connect_timeout_is_not_a_tls_problem() -> None:
+    """ConnectTimeout is also a ConnectionError subclass; it must hit the Timeout branch,
+    so it gets timed_out and NOT tls_problem (guards the order of the except clauses)."""
+    with patch("headers.requests.get",
+               side_effect=requests.exceptions.ConnectTimeout("connect timed out")):
+        result = headers._fetch("https://example.com")
+    assert result.get("timed_out") is True
+    assert "tls_problem" not in result
+
+
+@pytest.mark.parametrize("exc", [
+    pytest.param(requests.exceptions.ConnectionError("refused"), id="connection_error"),
+    pytest.param(requests.exceptions.SSLError("bad cert"), id="ssl_error"),
+])
+def test_fetch_non_timeout_errors_have_no_timed_out(exc: Exception) -> None:
+    """A refused connection or a TLS error is not reported as a timeout."""
+    with patch("headers.requests.get", side_effect=exc):
+        result = headers._fetch("https://example.com")
+    assert "error" in result
+    assert "timed_out" not in result
+
+
+def test_check_headers_https_read_timeout_then_http_ok_sets_https_timed_out() -> None:
+    """HTTPS times out, HTTP works: https_timed_out True on the HTTP result, and no
+    timed_out (the HTTP attempt itself did not time out)."""
+    with patch(
+        "headers.requests.get",
+        side_effect=[requests.exceptions.ReadTimeout("read timed out"), _response({})],
+    ):
+        result = headers.check_headers("example.com")
+    assert result["url"] == "http://example.com"
+    assert result["https_error"] == "read timed out"
+    assert result["https_timed_out"] is True
+    assert "timed_out" not in result
+
+
+def test_check_headers_https_refused_then_http_ok_has_no_https_timed_out() -> None:
+    """A refused HTTPS connection does not set https_timed_out."""
+    with patch(
+        "headers.requests.get",
+        side_effect=[requests.exceptions.ConnectionError("443 refused"), _response({})],
+    ):
+        result = headers.check_headers("example.com")
+    assert "https_timed_out" not in result
+
+
+def test_check_headers_https_ssl_error_then_http_connect_timeout() -> None:
+    """HTTPS fails on TLS, HTTP times out: each flag lands on the right side."""
+    with patch(
+        "headers.requests.get",
+        side_effect=[
+            requests.exceptions.SSLError("bad cert"),
+            requests.exceptions.ConnectTimeout("80 timed out"),
+        ],
+    ):
+        result = headers.check_headers("example.com")
+    assert result == {
+        "error": "80 timed out", "timed_out": True,
+        "https_error": "bad cert", "https_tls_problem": True,
+    }
+    assert "https_timed_out" not in result

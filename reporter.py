@@ -4,6 +4,7 @@ import re
 import time
 from datetime import datetime
 
+from headers import TIMEOUT as HEADERS_TIMEOUT
 from textsafe import clean_text
 
 # Plain-English reason for each cert_problem word from ssl_checker.
@@ -21,7 +22,14 @@ def _https_failure_kind(header_results: dict) -> str:
         return "TLS problem"
     if header_results.get("https_too_many_redirects"):
         return "too many redirects"
+    if header_results.get("https_timed_out"):
+        return _timeout_text(HEADERS_TIMEOUT)
     return "could not connect"
+
+
+def _timeout_text(seconds: int) -> str:
+    """Plain words for a request that got no answer in time."""
+    return f"timed out: no answer within {seconds} s"
 
 
 def _hsts_missing_reason(header: str, header_results: dict) -> str:
@@ -112,9 +120,11 @@ def _write_report(path, host, open_ports, header_results, redirect_results, ssl_
                 f.write("Error fetching headers: HTTPS and HTTP both failed\n")
                 f.write(f"HTTPS ({_https_failure_kind(header_results)}): "
                         f"{clean_text(header_results['https_error'])}\n")
-                f.write(f"HTTP: {clean_text(header_results['error'])}\n")
+                http_kind = f" ({_timeout_text(HEADERS_TIMEOUT)})" if header_results.get("timed_out") else ""
+                f.write(f"HTTP{http_kind}: {clean_text(header_results['error'])}\n")
             elif "error" in header_results:
-                f.write(f"Error fetching headers: {clean_text(header_results['error'])}\n")
+                kind = f" ({_timeout_text(HEADERS_TIMEOUT)})" if header_results.get("timed_out") else ""
+                f.write(f"Error fetching headers{kind}: {clean_text(header_results['error'])}\n")
             else:
                 if "url" in header_results:
                     f.write(f"Checked: {clean_text(header_results['url'])}\n")

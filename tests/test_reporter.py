@@ -808,3 +808,67 @@ def test_generate_report_gives_up_after_repeated_locks_and_cleans_up(in_tmp_dir:
             reporter.generate_report("example.com", [], NO_HEADERS, _redirects(), VALID_SSL)
     assert rep.call_count == reporter.RENAME_ATTEMPTS
     assert list(in_tmp_dir.iterdir()) == []
+
+
+# --- timeout wording ---------------------------------------------------------
+
+def test_generate_report_https_fallback_warning_timed_out() -> None:
+    """https_timed_out: the fallback warning names the timeout, not 'could not connect'."""
+    text = _report(header_results={
+        "url": "http://example.com", "https_error": "read timed out",
+        "https_timed_out": True,
+        "present": [], "missing": [], "not_applicable": ["Strict-Transport-Security"],
+    })
+    assert (
+        "[WARNING] HTTPS attempt failed (timed out: no answer within 5 s) — fell back to http://\n"
+        "Details: read timed out\n"
+    ) in text
+    assert "could not connect" not in text
+
+
+def test_generate_report_both_failed_https_timed_out_http_refused() -> None:
+    """Both failed, HTTPS by timeout and HTTP refused: only the HTTPS line mentions the timeout."""
+    text = _report(header_results={
+        "error": "80 refused", "https_error": "443 timed out", "https_timed_out": True,
+    })
+    assert (
+        "Error fetching headers: HTTPS and HTTP both failed\n"
+        "HTTPS (timed out: no answer within 5 s): 443 timed out\n"
+        "HTTP: 80 refused\n"
+    ) in text
+
+
+def test_generate_report_both_failed_http_timed_out() -> None:
+    """Both failed with the HTTP side timing out: the HTTP line names the timeout."""
+    text = _report(header_results={
+        "error": "80 timed out", "timed_out": True, "https_error": "443 refused",
+    })
+    assert (
+        "Error fetching headers: HTTPS and HTTP both failed\n"
+        "HTTPS (could not connect): 443 refused\n"
+        "HTTP (timed out: no answer within 5 s): 80 timed out\n"
+    ) in text
+
+
+def test_generate_report_lone_header_error_timed_out() -> None:
+    """A lone error dict with timed_out: the error line names the timeout."""
+    text = _report(header_results={"error": "timed out", "timed_out": True})
+    assert "Error fetching headers (timed out: no answer within 5 s): timed out\n" in text
+
+
+def test_generate_report_https_failure_without_flags_still_could_not_connect() -> None:
+    """No TLS, redirect or timeout flag: the default wording is still 'could not connect'
+    and nothing mentions a timeout."""
+    text = _report(header_results={
+        "url": "http://example.com", "https_error": "443 refused",
+        "present": [], "missing": [], "not_applicable": ["Strict-Transport-Security"],
+    })
+    assert "HTTPS attempt failed (could not connect)" in text
+    assert "timed out: no answer" not in text
+
+
+def test_generate_report_timeout_wording_uses_headers_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The seconds in the wording come from the timeout constant, not a literal 5."""
+    monkeypatch.setattr(reporter, "HEADERS_TIMEOUT", 9)
+    text = _report(header_results={"error": "timed out", "timed_out": True})
+    assert "Error fetching headers (timed out: no answer within 9 s): timed out\n" in text

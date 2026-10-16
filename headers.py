@@ -63,6 +63,9 @@ def _scheme(url: str) -> str:
     return urlsplit(url).scheme
 
 
+TIMEOUT = 5   # seconds each request may wait for an answer
+
+
 def _fetch(url: str) -> dict:
     """GET one URL, following redirects only on the same host, and sort its security headers."""
     notes: dict = {}
@@ -70,7 +73,7 @@ def _fetch(url: str) -> dict:
         target_host = host_of(url)
         for _ in range(MAX_REDIRECTS + 1):
             # stream=True + with: read only the headers, never the page body, then close.
-            with requests.get(url, timeout=5, allow_redirects=False, stream=True) as response:
+            with requests.get(url, timeout=TIMEOUT, allow_redirects=False, stream=True) as response:
                 headers = response.headers
                 if not response.is_redirect:
                     break
@@ -85,6 +88,8 @@ def _fetch(url: str) -> dict:
             return {"error": f"more than {MAX_REDIRECTS} redirects", "too_many_redirects": True}
     except requests.exceptions.SSLError as e:
         return {"error": str(e), "tls_problem": True}
+    except requests.exceptions.Timeout as e:   # ConnectTimeout and ReadTimeout (before RequestException)
+        return {"error": str(e), "timed_out": True}
     except (requests.exceptions.RequestException, ValueError) as e:   # ValueError: garbled Location
         return {"error": str(e)}
 
@@ -120,4 +125,6 @@ def check_headers(host: str) -> dict:
         fallback["https_tls_problem"] = True
     if result.get("too_many_redirects"):
         fallback["https_too_many_redirects"] = True
+    if result.get("timed_out"):
+        fallback["https_timed_out"] = True
     return fallback
