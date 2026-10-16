@@ -107,14 +107,14 @@ def main() -> None:
         print(f"\n[!] Could not resolve host: {e}")   # no report: there is nothing to assess
         sys.exit(1)
     if had_internal_errors:
-        sys.exit(1)                    # the report was written, but some checks didn't run
+        sys.exit(3)                    # report written, but some checks hit a bug (1 = host not found)
 
 
 def _run_check(label: str, key: str, errors: dict[str, str], func, *args):
     """Run one check; if it crashes because of a bug in the scanner, say so loudly and go on.
 
     The other checks still run and the report is still written, but the bug is shown on the
-    console, in that report section, and through exit code 1. Ctrl+C and "host not found"
+    console, in that report section, and through exit code 3. Ctrl+C and "host not found"
     are not bugs, so they pass straight through.
     """
     try:

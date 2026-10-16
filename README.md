@@ -53,6 +53,19 @@ address instead, pass it directly, e.g. `python main.py ::1`. The certificate's 
 then report a mismatch, because certificates are issued for names, not raw addresses.
 Link-local IPv6 addresses (`fe80::...`) aren't supported.
 
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Scan finished and the report was written |
+| 1 | The host name could not be resolved (no report written) |
+| 2 | Bad arguments, e.g. an invalid host, port or `--workers` value (nothing scanned) |
+| 3 | Internal error: a bug in the scanner stopped one or more checks. The report was still written, but those sections are incomplete |
+| 130 | Stopped with Ctrl+C (`[!] Scan interrupted by keyboard input (Ctrl+C) — stopped early, no report was written`) |
+
+An unexpected crash outside the checks (for example, the report file can't be saved) prints a
+Python error message (traceback) and also exits with 1.
+
 ## Example
 
 ```powershell

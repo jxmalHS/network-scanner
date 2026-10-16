@@ -516,11 +516,11 @@ def test_main_normal_run_leaves_ctrl_c_alone(
 def test_main_internal_error_in_one_check_still_runs_the_others(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
 ) -> None:
-    """check_ssl crashes with a bug: headers/redirects still run, the report is written, exit code 1."""
+    """check_ssl crashes with a bug: headers/redirects still run, the report is written, exit code 3."""
     checks["check_ssl"].side_effect = ValueError("boom")
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, "localhost")
-    assert exc.value.code == 1
+    assert exc.value.code == 3
     checks["check_headers"].assert_called_once()
     checks["check_open_redirect"].assert_called_once()
     kwargs = checks["generate_report"].call_args.kwargs
@@ -540,7 +540,7 @@ def test_main_internal_error_in_port_scan_does_not_crash_the_banner_loop(
     checks["scan_ports"].side_effect = RuntimeError("bug")
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, "localhost")
-    assert exc.value.code == 1
+    assert exc.value.code == 3
     checks["generate_report"].assert_called_once()
     assert "ports" in checks["generate_report"].call_args.kwargs["internal_errors"]
 
@@ -578,3 +578,17 @@ def test_main_internal_error_message_is_cleaned(
     out = capsys.readouterr().out
     assert "\x1b" not in out
     assert "\n[+] Port 1 open" not in out
+
+
+def test_main_two_internal_errors_exit_3_with_one_report(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two checks hit bugs: one report is still written, the console counts both, exit code 3."""
+    checks["check_headers"].side_effect = ValueError("bug one")
+    checks["check_ssl"].side_effect = RuntimeError("bug two")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 3
+    checks["generate_report"].assert_called_once()
+    assert set(checks["generate_report"].call_args.kwargs["internal_errors"]) == {"headers", "ssl"}
+    assert "2 check(s) hit an internal error" in capsys.readouterr().out
