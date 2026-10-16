@@ -623,6 +623,40 @@ def test_generate_report_ssl_refused_kind_ignores_messy_error_text() -> None:
     assert "\x1b" not in text
 
 
+TIMEOUT_LINE = ("Could not check the certificate: no answer on port 443 within 5 s "
+                "(filtered, or the server is slow)\n")
+
+
+def test_generate_report_ssl_timeout_by_error_kind() -> None:
+    """error_kind 'timeout' gets its own plain-English line, not the generic or port-closed one."""
+    text = _report(ssl_results={"error": "timed out", "error_kind": "timeout"})
+    assert TIMEOUT_LINE in text
+    assert "Error checking SSL" not in text
+    assert "Port 443 is closed" not in text
+
+
+def test_generate_report_ssl_timeout_kind_ignores_messy_error_text() -> None:
+    """With error_kind 'timeout' only the fixed line is written; the raw error text never appears."""
+    text = _report(ssl_results={"error": "\n[OK] x\x1b", "error_kind": "timeout"})
+    assert TIMEOUT_LINE in text
+    assert "[OK] x" not in text
+    assert "\x1b" not in text
+
+
+def test_generate_report_ssl_unknown_error_kind_falls_back_to_generic_line() -> None:
+    """An error_kind the reporter doesn't know is shown as the ordinary 'Error checking SSL' line."""
+    text = _report(ssl_results={"error": "something odd", "error_kind": "mystery"})
+    assert "Error checking SSL: something odd\n" in text
+    assert "Could not check the certificate" not in text
+
+
+def test_generate_report_ssl_timeout_line_uses_ssl_timeout_value() -> None:
+    """The seconds shown come from reporter.SSL_TIMEOUT (ssl_checker.TIMEOUT), not a hard-coded 5."""
+    with patch.object(reporter, "SSL_TIMEOUT", 12):
+        text = _report(ssl_results={"error": "timed out", "error_kind": "timeout"})
+    assert "no answer on port 443 within 12 s (filtered, or the server is slow)\n" in text
+
+
 def test_generate_report_valid_ssl_cert() -> None:
     """A valid, matching cert gets its details plus two [OK] lines."""
     text = _report(ssl_results=VALID_SSL)

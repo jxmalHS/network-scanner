@@ -214,10 +214,10 @@ def test_check_ssl_missing_names_default_to_unknown() -> None:
 
 
 def test_check_ssl_connects_to_port_443_with_sni() -> None:
-    """It connects to (host, 443) with a 5s timeout and sends the host as SNI server_hostname."""
+    """It connects to (host, 443) with the module's TIMEOUT and sends the host as SNI server_hostname."""
     with _serve_cert(_cert()) as (fake_conn, context):
         ssl_checker.check_ssl("example.com")
-    fake_conn.assert_called_once_with(("example.com", 443), timeout=5)
+    fake_conn.assert_called_once_with(("example.com", 443), timeout=ssl_checker.TIMEOUT)
     assert context.wrap_socket.call_args.kwargs == {"server_hostname": "example.com"}
 
 
@@ -232,13 +232,12 @@ def test_check_ssl_connection_refused_returns_error() -> None:
 
 
 @pytest.mark.parametrize("err", [
-    TimeoutError("timed out"),
     ConnectionResetError("connection refused by peer"),   # says "refused" but isn't a refusal
     OSError("Connection refused"),                         # plain OSError: text alone doesn't count
     ssl.SSLError(1, "wrong version number"),
 ])
 def test_check_ssl_other_errors_have_no_error_kind(err: Exception) -> None:
-    """Only a real ConnectionRefusedError gets error_kind; other failures (even saying 'refused') don't."""
+    """Only refusals and timeouts get error_kind; other failures (even saying 'refused') don't."""
     with patch("ssl_checker.socket.create_connection", side_effect=err):
         result = ssl_checker.check_ssl("example.com")
     assert "error" in result
@@ -246,9 +245,42 @@ def test_check_ssl_other_errors_have_no_error_kind(err: Exception) -> None:
 
 
 def test_check_ssl_timeout_returns_error() -> None:
-    """A connect timeout becomes an {'error': ...} dict."""
+    """A connect timeout becomes an error dict tagged error_kind 'timeout'."""
     with patch("ssl_checker.socket.create_connection", side_effect=TimeoutError("timed out")):
-        assert ssl_checker.check_ssl("example.com") == {"error": "timed out"}
+        assert ssl_checker.check_ssl("example.com") == {"error": "timed out", "error_kind": "timeout"}
+
+
+def test_check_ssl_connect_timeout_has_error_kind_timeout() -> None:
+    """A TimeoutError from create_connection (no answer on 443) is tagged 'timeout'."""
+    with patch("ssl_checker.socket.create_connection", side_effect=TimeoutError("timed out")):
+        result = ssl_checker.check_ssl("example.com")
+    assert result["error_kind"] == "timeout"
+
+
+def test_check_ssl_socket_timeout_has_error_kind_timeout() -> None:
+    """socket.timeout (an alias of TimeoutError since Python 3.10) is tagged 'timeout' too."""
+    with patch("ssl_checker.socket.create_connection", side_effect=socket.timeout("timed out")):
+        result = ssl_checker.check_ssl("example.com")
+    assert result["error_kind"] == "timeout"
+
+
+def test_check_ssl_handshake_timeout_has_error_kind_timeout() -> None:
+    """A timeout during the TLS handshake (raised by wrap_socket) is tagged 'timeout'."""
+    context = MagicMock()
+    context.wrap_socket.side_effect = TimeoutError("_ssl.c:999: The handshake operation timed out")
+    with patch("ssl_checker.ssl.create_default_context", return_value=context), patch(
+        "ssl_checker.socket.create_connection"
+    ):
+        result = ssl_checker.check_ssl("example.com")
+    assert result["error_kind"] == "timeout"
+    assert "handshake operation timed out" in result["error"]
+
+
+def test_check_ssl_connect_uses_module_timeout() -> None:
+    """create_connection gets timeout=ssl_checker.TIMEOUT (so the reporter's number matches)."""
+    with patch.object(ssl_checker, "TIMEOUT", 7), _serve_cert(_cert()) as (fake_conn, _context):
+        ssl_checker.check_ssl("example.com")
+    assert fake_conn.call_args.kwargs["timeout"] == 7
 
 
 def test_check_ssl_verification_failure_returns_error() -> None:

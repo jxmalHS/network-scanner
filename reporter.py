@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 
 from headers import TIMEOUT as HEADERS_TIMEOUT
+from ssl_checker import TIMEOUT as SSL_TIMEOUT
 from textsafe import clean_text
 
 # Plain-English reason for each cert_problem word from ssl_checker.
@@ -217,6 +218,9 @@ def _write_report(path, host, open_ports, header_results, redirect_results, ssl_
             elif "error" in ssl_results:
                 if ssl_results.get("error_kind") == "refused":
                     f.write("[CRITICAL] Port 443 is closed — HTTPS is not enabled on this server\n")
+                elif ssl_results.get("error_kind") == "timeout":
+                    f.write(f"Could not check the certificate: no answer on port 443 within "
+                            f"{SSL_TIMEOUT} s (filtered, or the server is slow)\n")
                 else:
                     f.write(f"Error checking SSL: {clean_text(ssl_results['error'])}\n")
             else:

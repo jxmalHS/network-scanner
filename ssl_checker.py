@@ -61,10 +61,13 @@ def _cert_problem(error: ssl.SSLCertVerificationError) -> str:
     return _CERT_PROBLEMS.get(code, "invalid")
 
 
+TIMEOUT = 5   # seconds to wait for port 443 (connect and TLS handshake)
+
+
 def check_ssl(host):
     context = ssl.create_default_context()
     try:
-        with socket.create_connection((host, 443), timeout=5) as sock:
+        with socket.create_connection((host, 443), timeout=TIMEOUT) as sock:
             with context.wrap_socket(sock, server_hostname=host) as ssock:
                 cert = ssock.getpeercert()
 
@@ -109,4 +112,6 @@ def check_ssl(host):
         if isinstance(e, ConnectionRefusedError):
             # One word the reporter can trust, instead of searching the OS's error text.
             result["error_kind"] = "refused"
+        elif isinstance(e, TimeoutError):      # socket.timeout too: connect or TLS handshake
+            result["error_kind"] = "timeout"
         return result
