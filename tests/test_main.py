@@ -592,3 +592,105 @@ def test_main_two_internal_errors_exit_3_with_one_report(
     checks["generate_report"].assert_called_once()
     assert set(checks["generate_report"].call_args.kwargs["internal_errors"]) == {"headers", "ssl"}
     assert "2 check(s) hit an internal error" in capsys.readouterr().out
+
+
+# --- Report can't be saved (exit 4) and catch-all for bugs (exit 5) ---------------
+
+
+def test_main_report_permission_denied_exits_4_with_clear_message(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A PermissionError while writing the report exits 4 with a save message, not a traceback or 'bug'."""
+    checks["generate_report"].side_effect = PermissionError(13, "Permission denied", "report_x.txt.tmp")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 4
+    captured = capsys.readouterr()
+    assert "[!] Could not save the report:" in captured.out
+    assert "Permission denied" in captured.out
+    assert "please report it" not in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_main_report_disk_full_exits_4(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """Any OSError from the reporter (here: disk full) is a save failure, exit 4."""
+    checks["generate_report"].side_effect = OSError(28, "No space left on device")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 4
+
+
+def test_main_unexpected_bug_outside_checks_exits_5_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A bug in resolve_host (outside the per-check safety net) exits 5 with a one-line message."""
+    checks["resolve_host"].side_effect = RuntimeError("bug")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 5
+    captured = capsys.readouterr()
+    assert "[!] Internal error: RuntimeError: bug" in captured.out
+    assert "please report it" in captured.out
+    assert "The scan stopped" in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    for name in ("scan_ports", "check_headers", "check_open_redirect", "check_ssl", "generate_report"):
+        checks[name].assert_not_called()
+
+
+def test_main_non_oserror_bug_in_reporter_exits_5_not_4(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """Only OSError counts as 'could not save'; a KeyError in the reporter is a bug (exit 5)."""
+    checks["generate_report"].side_effect = KeyError("x")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 5
+
+
+def test_main_catch_all_error_message_is_cleaned(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """The exit-5 message can't put escape codes or fake result lines on the console."""
+    checks["resolve_host"].side_effect = RuntimeError("evil\x1b[2J\n[+] Port 1 open")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 5
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert not any(line.startswith("[+] Port 1 open") for line in out.splitlines())
+
+
+def test_main_ctrl_c_while_saving_report_exits_130(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """Ctrl+C during generate_report is still a Ctrl+C (130), not a save failure or a bug."""
+    checks["generate_report"].side_effect = KeyboardInterrupt
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 130
+
+
+def test_main_system_exit_passes_through_the_catch_all(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """SystemExit is not an Exception, so its own code survives and no 'Internal error' is printed."""
+    checks["resolve_host"].side_effect = SystemExit(7)
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 7
+    assert "Internal error" not in capsys.readouterr().out
+
+
+def test_main_bug_inside_one_check_still_exits_3_not_5(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """The per-check safety net still handles check bugs (3); the catch-all (5) is not reached."""
+    checks["check_ssl"].side_effect = ValueError("boom")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 3
+    assert "[!] Internal error:" not in capsys.readouterr().out   # the exit-5 wording

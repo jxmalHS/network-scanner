@@ -15,6 +15,10 @@ from textsafe import clean_text
 COMMON_PORTS = [21,22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 8080, 8443]
 
 
+class ReportSaveError(Exception):
+    """The report file could not be written (folder not writable, disk full, file locked)."""
+
+
 def valid_host(value: str) -> str:
     """Accept a plain hostname or IP address; reject anything that could point elsewhere."""
     if "%" in value:                           # IPv6 zone IDs (fe80::1%eth0) break URLs
@@ -106,8 +110,23 @@ def main() -> None:
     except HostResolutionError as e:
         print(f"\n[!] Could not resolve host: {e}")   # no report: there is nothing to assess
         sys.exit(1)
+    except ReportSaveError as e:
+        print(f"\n[!] Could not save the report: {e}. Check that this folder is writable "
+              f"and the disk isn't full. The results above were not saved.")
+        sys.exit(4)
+    except Exception as e:             # not BaseException: Ctrl+C and SystemExit pass through
+        print(f"\n[!] Internal error: {_bug_detail(e)} — this is a bug in the scanner, "
+              f"please report it. The scan stopped.")
+        sys.exit(5)
     if had_internal_errors:
-        sys.exit(3)                    # report written, but some checks hit a bug (1 = host not found)
+        sys.exit(3)                    # report written, but some checks hit a bug (see README table)
+
+
+def _bug_detail(e: Exception) -> str:
+    """'Type: message (file line N)' for a bug, with the message made safe to print."""
+    frame = traceback.extract_tb(e.__traceback__)[-1]
+    return (f"{type(e).__name__}: {clean_text(str(e))} "
+            f"({os.path.basename(frame.filename)} line {frame.lineno})")
 
 
 def _run_check(label: str, key: str, errors: dict[str, str], func, *args):
@@ -122,9 +141,7 @@ def _run_check(label: str, key: str, errors: dict[str, str], func, *args):
     except HostResolutionError:
         raise
     except Exception as e:                  # Exception, not BaseException: Ctrl+C passes through
-        frame = traceback.extract_tb(e.__traceback__)[-1]
-        detail = (f"{type(e).__name__}: {clean_text(str(e))} "
-                  f"({os.path.basename(frame.filename)} line {frame.lineno})")
+        detail = _bug_detail(e)
         print(f"[!] Internal error in {label}: {detail} — this is a bug in the scanner, "
               f"please report it")
         errors[key] = detail
@@ -167,8 +184,11 @@ def run_scan(args: argparse.Namespace) -> bool:
     ssl_results = _run_check("the SSL/TLS check", "ssl", errors, check_ssl, host)
 
     print("[*] Generating report...")
-    filename = generate_report(host, open_ports, header_results, redirect_results, ssl_results,
-                               address=address, internal_errors=errors)
+    try:
+        filename = generate_report(host, open_ports, header_results, redirect_results, ssl_results,
+                                   address=address, internal_errors=errors)
+    except OSError as e:               # PermissionError after the retries, disk full, ...
+        raise ReportSaveError(clean_text(str(e))) from e
     print(f"[+] Report saved to {filename}\n")
     if errors:
         print(f"[!] {len(errors)} check(s) hit an internal error; their report sections are incomplete")
