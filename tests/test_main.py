@@ -979,6 +979,17 @@ def test_main_ipv6_flag_with_ipv6_literal_is_accepted_without_note(
     assert checks["generate_report"].call_args.kwargs["note"] is None
 
 
+def test_main_ipv6_flag_with_long_form_ipv6_literal_has_no_note(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """'0:0:0:0:0:0:0:1 --ipv6' resolves to '::1' (differs from the text typed) but is still a
+    literal that every check uses, so there's no note."""
+    checks["resolve_host"].return_value = (socket.AF_INET6, "::1")
+    _run(monkeypatch, "0:0:0:0:0:0:0:1", "--ipv6")
+    assert "Note:" not in capsys.readouterr().out
+    assert checks["generate_report"].call_args.kwargs["note"] is None
+
+
 def test_main_ipv6_flag_without_ipv6_address_exits_1(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
 ) -> None:

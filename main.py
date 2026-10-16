@@ -213,9 +213,10 @@ def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
     _, address = resolve_host(host, ipv6=args.ipv6)
     target = host if address == host else f"{host} ({address})"
     # With --ipv6 only the port scan is steered; say so, so the Target line can't mislead.
+    # Not for IP literals (even long forms like 0:0:0:0:0:0:0:1): every check uses that address.
     note = (f"Note: only the port scan used {address}; the header, redirect and SSL checks "
             f"connect by name and the system picks the address."
-            if args.ipv6 and address != host else None)
+            if args.ipv6 and _ip_version(host) is None else None)
 
     print(f"\n[*] Starting scan on {target}")
     if note:
