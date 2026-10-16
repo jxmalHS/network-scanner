@@ -21,6 +21,19 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+## Requirements
+
+- **Python 3.14 (recommended).** It's the only version the scanner is tested on, and the one where
+  the open redirect check is guaranteed to read HTML pages fully like a browser does (it uses
+  `HTMLParser(scripting=True)`).
+- **Python 3.11 to 3.13 should also work, but aren't tested.** The code needs at least 3.11, and
+  its libraries (`requests`, `urllib3`, `pytest`) need at least 3.10. On these versions a fallback
+  handles `<noscript>`, but very unusual HTML may be read slightly differently, because Python's
+  built-in HTML parser has changed between versions.
+- **Python 3.10 and older won't run it.**
+
+Check your version with `python --version`.
+
 ## Usage
 
 Basic scan using common ports:
