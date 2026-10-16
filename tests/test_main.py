@@ -908,6 +908,32 @@ def test_main_help_mentions_debug(
     assert "--debug" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("flush_error", [None, OSError, ValueError])
+def test_print_traceback_flushes_stdout_first(
+    monkeypatch: pytest.MonkeyPatch, flush_error: type[Exception] | None
+) -> None:
+    """stdout is flushed before any traceback line reaches stderr; a failing flush is ignored."""
+    record: list[str] = []
+
+    def flush() -> None:
+        record.append("flush")
+        if flush_error is not None:
+            raise flush_error("stdout is gone")
+
+    def write(text: str) -> int:
+        record.append("err")
+        return len(text)
+
+    monkeypatch.setattr(sys, "stdout", MagicMock(flush=MagicMock(side_effect=flush)))
+    monkeypatch.setattr(sys, "stderr", MagicMock(write=MagicMock(side_effect=write)))
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as e:
+        main_module._print_traceback(e)
+    assert record[0] == "flush"
+    assert "err" in record
+
+
 # --- --ipv6: port-scan the host's IPv6 address -------------------------------
 
 IPV6_NOTE = ("Note: only the port scan used ::1; the header, redirect and SSL checks "

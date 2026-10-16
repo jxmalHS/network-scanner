@@ -160,6 +160,10 @@ def _print_traceback(e: BaseException) -> None:
     Error messages can carry text from the scanned host, so every line goes through clean_text
     (its indentation is put back afterwards), and the prefix stops any line posing as a result.
     """
+    # Redirected stdout is buffered but stderr isn't: flush first so lines already printed
+    # come before the traceback in a log that captures both.
+    with contextlib.suppress(OSError, ValueError):
+        sys.stdout.flush()
     for line in "".join(traceback.format_exception(e)).splitlines():
         indent = len(line) - len(line.lstrip(" "))
         print(f"[debug] {' ' * indent}{clean_text(line)}", file=sys.stderr)
