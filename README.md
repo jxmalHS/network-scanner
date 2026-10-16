@@ -5,7 +5,7 @@ A network vulnerability scanner: a command line tool that scans a target host fo
 ## What it checks
 
 - **Open ports** — identifies which ports are accepting connections and grabs service banners to identify running software and versions
-- **HTTP security headers** — checks for missing headers that leave users exposed to common attacks. For HSTS it also flags a short max-age, a header that doesn't cover subdomains (`[INFO]`, no `includeSubDomains`), and a `preload` request the preload list wouldn't accept (`[WARNING]`). Only the target's own header is read; no preload list is ever looked up.
+- **HTTP security headers** — checks for missing headers that leave users exposed to common attacks. For HSTS it also flags a short max-age, a header that doesn't cover subdomains (`[INFO]`, no `includeSubDomains`), and a `preload` request whose header doesn't meet the preload list's header rules, `includeSubDomains` and a max-age of at least 1 year (`[WARNING]`; the list's other rules aren't checked). Only the target's own header is read; no preload list is ever looked up.
 - **Open redirects** — tests whether the server blindly follows external redirect parameters
 - **SSL/TLS certificate** — checks whether HTTPS is enabled, validates the certificate expiry date, and flags expired or domain-mismatched certificates
 
