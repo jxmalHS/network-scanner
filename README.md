@@ -1,6 +1,6 @@
-# Network Vulnerability Scanner
+# Tamer
 
-A command line tool that scans a target host for common security vulnerabilities.
+A network vulnerability scanner: a command line tool that scans a target host for common security vulnerabilities.
 
 ## What it checks
 

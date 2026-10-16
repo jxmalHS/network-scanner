@@ -88,7 +88,7 @@ def test_generate_report_ipv6_host_gets_safe_filename(in_tmp_dir: Path) -> None:
 def test_generate_report_includes_target_header() -> None:
     """The report starts with its title and the target host."""
     text = _report()
-    assert text.startswith("Network Vulnerability Scan Report\nTarget: example.com\n")
+    assert text.startswith("Tamer Network Vulnerability Scan Report\nTarget: example.com\n")
 
 
 def _target_line(in_tmp_dir: Path, host: str, **kwargs: Any) -> str:

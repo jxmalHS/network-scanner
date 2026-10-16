@@ -90,7 +90,7 @@ def _interrupt_once(signum: int, frame: object) -> None:
 def main() -> None:
     _safe_console()
     signal.signal(signal.SIGINT, _interrupt_once)
-    parser = argparse.ArgumentParser(description="Network Vulnerability Scanner")
+    parser = argparse.ArgumentParser(description="Tamer: network vulnerability scanner")
     parser.add_argument("host", type=valid_host, help="Target host or IP address")
     parser.add_argument("--ports", nargs="+", type=port_number, default=COMMON_PORTS, help="Ports to scan")
     parser.add_argument("--workers", type=worker_count, default=DEFAULT_WORKERS,
