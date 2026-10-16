@@ -1,5 +1,6 @@
 """Tests for main.py - argparse handling and wiring of the checks (every check mocked)."""
 import argparse
+import builtins
 import io
 import socket
 import sys
@@ -694,3 +695,89 @@ def test_main_bug_inside_one_check_still_exits_3_not_5(
         _run(monkeypatch, "localhost")
     assert exc.value.code == 3
     assert "[!] Internal error:" not in capsys.readouterr().out   # the exit-5 wording
+
+
+# --- Stopped after the report was saved: the console says the file exists ------------
+
+ALREADY_SAVED = "the report was already saved: "
+
+
+def _fail_on_report_saved(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    """Make main.py's print raise `error` on the "[+] Report saved" line; other lines print normally.
+
+    This simulates something going wrong in the gap right after generate_report returned.
+    """
+    real_print = builtins.print
+
+    def fake_print(*args: object, **kwargs: object) -> None:
+        if args and str(args[0]).startswith("[+] Report saved"):
+            raise error
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr(main_module, "print", fake_print, raising=False)
+
+
+def test_main_ctrl_c_after_report_saved_says_report_was_saved(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Ctrl+C just after the report is written: exit 130 and the message names the saved file."""
+    checks["generate_report"].return_value = "report_localhost_20261017.txt"
+    _fail_on_report_saved(monkeypatch, KeyboardInterrupt())
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 130
+    out = capsys.readouterr().out
+    assert ALREADY_SAVED + "report_localhost_20261017.txt" in out
+    assert "no report was written" not in out
+
+
+def test_main_ctrl_c_inside_generate_report_says_no_report(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Ctrl+C while the report is still being written: the file isn't confirmed, so the usual message."""
+    checks["generate_report"].side_effect = KeyboardInterrupt
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 130
+    out = capsys.readouterr().out
+    assert ABORT_MESSAGE in out
+    assert ALREADY_SAVED not in out
+
+
+def test_main_ctrl_c_after_saving_with_check_error_exits_130_not_3(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A check bug would mean exit 3, but Ctrl+C after saving wins: exit 130, 'already saved'."""
+    checks["check_ssl"].side_effect = ValueError("boom")
+    _fail_on_report_saved(monkeypatch, KeyboardInterrupt())
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 130
+    assert ALREADY_SAVED + "report.txt" in capsys.readouterr().out
+
+
+def test_main_bug_after_report_saved_exits_5_and_says_report_was_saved(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A bug after the file is written still exits 5, but tells the user the report exists."""
+    _fail_on_report_saved(monkeypatch, RuntimeError("late bug"))
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 5
+    out = capsys.readouterr().out
+    assert "[!] Internal error: RuntimeError: late bug" in out
+    assert "The scan stopped, but the report was already saved: report.txt." in out
+    assert "no report was written" not in out
+
+
+def test_main_bug_before_report_saved_exits_5_and_says_no_report(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A bug before anything is written (resolve_host) exits 5 and says no report was written."""
+    checks["resolve_host"].side_effect = RuntimeError("bug")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost")
+    assert exc.value.code == 5
+    out = capsys.readouterr().out
+    assert "The scan stopped; no report was written." in out
+    assert ALREADY_SAVED not in out

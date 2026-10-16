@@ -101,11 +101,16 @@ def main() -> None:
                         help=f"Ports to check at the same time (1-{MAX_WORKERS}, default {DEFAULT_WORKERS})")
     args = parser.parse_args()
 
+    saved: dict[str, str] = {}          # run_scan fills in "report" once the file is on disk
     try:
-        had_internal_errors = run_scan(args)
+        had_internal_errors = run_scan(args, saved)
     except KeyboardInterrupt:
         # \n: the terminal echoes ^C on the current line
-        print("\n[!] Scan interrupted by keyboard input (Ctrl+C) — stopped early, no report was written")
+        if "report" in saved:
+            print(f"\n[!] Scan interrupted by keyboard input (Ctrl+C) — the report was already "
+                  f"saved: {saved['report']}")
+        else:
+            print("\n[!] Scan interrupted by keyboard input (Ctrl+C) — stopped early, no report was written")
         sys.exit(130)                  # 128 + 2 (SIGINT): the usual "stopped by Ctrl+C" code
     except HostResolutionError as e:
         print(f"\n[!] Could not resolve host: {e}")   # no report: there is nothing to assess
@@ -115,8 +120,10 @@ def main() -> None:
               f"and the disk isn't full. The results above were not saved.")
         sys.exit(4)
     except Exception as e:             # not BaseException: Ctrl+C and SystemExit pass through
+        report = (f", but the report was already saved: {saved['report']}" if "report" in saved
+                  else "; no report was written")
         print(f"\n[!] Internal error: {_bug_detail(e)} — this is a bug in the scanner, "
-              f"please report it. The scan stopped.")
+              f"please report it. The scan stopped{report}.")
         sys.exit(5)
     if had_internal_errors:
         sys.exit(3)                    # report written, but some checks hit a bug (see README table)
@@ -148,8 +155,12 @@ def _run_check(label: str, key: str, errors: dict[str, str], func, *args):
         return None
 
 
-def run_scan(args: argparse.Namespace) -> bool:
-    """Run every check in order and write the report. True if any check hit an internal error."""
+def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
+    """Run every check in order and write the report. True if any check hit an internal error.
+
+    Puts the report's filename in saved["report"] as soon as it is written, so main() can say
+    so if Ctrl+C or a bug stops things after that point.
+    """
     host = args.host
     ports = args.ports
     errors: dict[str, str] = {}
@@ -189,6 +200,7 @@ def run_scan(args: argparse.Namespace) -> bool:
                                    address=address, internal_errors=errors)
     except OSError as e:               # PermissionError after the retries, disk full, ...
         raise ReportSaveError(clean_text(str(e))) from e
+    saved["report"] = filename         # before any print: Ctrl+C can land from here on
     print(f"[+] Report saved to {filename}\n")
     if errors:
         print(f"[!] {len(errors)} check(s) hit an internal error; their report sections are incomplete")

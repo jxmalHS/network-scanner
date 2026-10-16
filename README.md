@@ -76,8 +76,8 @@ Link-local IPv6 addresses (`fe80::...`) aren't supported.
 | 2 | Bad arguments, e.g. an invalid host, port or `--workers` value (nothing scanned) |
 | 3 | Internal error: a bug in the scanner stopped one or more checks. The report was still written, but those sections are incomplete |
 | 4 | The report could not be saved (for example the folder isn't writable or the disk is full). The results were only shown on screen |
-| 5 | Scanner bug outside the checks: the scan stopped. The console says what went wrong; please report it |
-| 130 | Stopped with Ctrl+C (`[!] Scan interrupted by keyboard input (Ctrl+C) — stopped early, no report was written`) |
+| 5 | Scanner bug outside the checks: the scan stopped. The console says what went wrong and whether a report was saved; please report it |
+| 130 | Stopped with Ctrl+C (`[!] Scan interrupted by keyboard input (Ctrl+C) — stopped early, no report was written`). If you press Ctrl+C just after the report was saved, the message says so and names the file |
 
 ## Example
 
