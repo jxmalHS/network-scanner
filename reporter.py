@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 
 from headers import TIMEOUT as HEADERS_TIMEOUT
+from redirects import PROBE_TIMEOUT as REDIRECT_TIMEOUT
 from ssl_checker import TIMEOUT as SSL_TIMEOUT
 from textsafe import clean_text
 
@@ -219,6 +220,10 @@ def _write_report(path, host, open_ports, header_results, redirect_results, ssl_
                     where = ("; no probes were answered" if answered == 0 else
                              f" at probe {r['probes_sent']} of {r['probes_total']}; the rest were not sent")
                     f.write(f"[WARNING] Check incomplete: TLS/certificate problem with {r['base_url']}{where}\n")
+                elif r.get("stop_reason") == "timeout":
+                    where = (f"{_timeout_text(REDIRECT_TIMEOUT)}; no probes were answered" if answered == 0 else
+                             f"timed out at probe {r['probes_sent']} of {r['probes_total']}; the rest were not sent")
+                    f.write(f"[WARNING] Check incomplete: connection to {r['base_url']} {where}\n")
                 elif answered == 0:
                     f.write(f"[WARNING] Check incomplete: could not connect to {r['base_url']}; "
                             f"no probes were answered\n")

@@ -410,7 +410,47 @@ def test_check_open_redirect_keeps_findings_when_connect_timeout_stops_scan() ->
     assert result["vulnerable"] == [FIRST_HTTP]
     assert result["probes_sent"] == 3
     assert result["complete"] is False
+    assert result["stop_reason"] == "timeout"
     assert fake_get.call_count == 3
+
+
+CONNECT_TIMEOUT = requests.exceptions.ConnectTimeout("no answer")
+
+
+def test_all_connect_timeouts_stop_with_reason_timeout() -> None:
+    """Every probe times out connecting (HTTP, then HTTPS): stop after 4 with stop_reason 'timeout'."""
+    fake_get = MagicMock(side_effect=CONNECT_TIMEOUT)
+    result = _run(fake_get)
+    assert fake_get.call_count == 4
+    assert result["complete"] is False
+    assert result["stop_reason"] == "timeout"
+    assert result["switch_reason"] == "no_http"
+
+
+@pytest.mark.parametrize(("first", "second", "reason"), [
+    (REFUSED, CONNECT_TIMEOUT, "timeout"),
+    (CONNECT_TIMEOUT, REFUSED, "connection"),
+])
+def test_stop_reason_comes_from_the_failure_that_stopped_the_check(
+    first: Exception, second: Exception, reason: str,
+) -> None:
+    """Two connection failures in a row: the second one (where it stopped) names the reason."""
+    fake_get = _answers(_response(), first, second)
+    result = _run(fake_get)
+    assert fake_get.call_count == 3
+    assert result["complete"] is False
+    assert result["stop_reason"] == reason
+
+
+def test_read_timeout_between_connect_timeouts_resets_the_count() -> None:
+    """ConnectTimeout, ReadTimeout (it connected), ConnectTimeout, then answers: never two
+    connection failures in a row, so the check runs to the end and stays complete."""
+    fake_get = _answers(CONNECT_TIMEOUT, requests.exceptions.ReadTimeout("slow page"), CONNECT_TIMEOUT)
+    result = _run(fake_get)
+    assert fake_get.call_count == TOTAL_PROBES
+    assert result["complete"] is True
+    assert result["stop_reason"] is None
+    assert result["probes_skipped"] == 3
 
 
 def test_check_open_redirect_read_timeout_skips_only_that_probe() -> None:

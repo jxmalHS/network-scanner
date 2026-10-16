@@ -765,6 +765,42 @@ def test_generate_report_two_failures_with_no_answers_says_could_not_connect() -
     assert "[WARNING] No probe got a usable answer" in section
 
 
+def test_generate_report_timeout_stop_with_no_answers() -> None:
+    """stop_reason 'timeout' before any answer: says the connection timed out and for how long."""
+    r = {**_redirects(sent=2, skipped=1, complete=False), "stop_reason": "timeout"}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[WARNING] Check incomplete: connection to http://example.com timed out: "
+            "no answer within 5 s; no probes were answered\n") in section
+    assert "could not connect" not in section
+
+
+def test_generate_report_timeout_stop_after_some_answers() -> None:
+    """stop_reason 'timeout' at probe 6: says where it stopped and keeps the hedged clean line."""
+    r = {**_redirects(sent=6, skipped=1, complete=False), "stop_reason": "timeout"}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[WARNING] Check incomplete: connection to http://example.com timed out "
+            "at probe 6 of 32; the rest were not sent\n") in section
+    assert "host stopped answering" not in section
+    assert "No open redirects found in the 4 probes that got an answer.\n" in section
+
+
+def test_generate_report_timeout_stop_uses_redirect_timeout() -> None:
+    """The seconds shown come from redirects.PROBE_TIMEOUT, not a hard-coded number."""
+    r = {**_redirects(sent=2, skipped=1, complete=False), "stop_reason": "timeout"}
+    with patch("reporter.REDIRECT_TIMEOUT", 9):
+        section = _redirect_section(_report(redirect_results=r))
+    assert "timed out: no answer within 9 s; no probes were answered\n" in section
+
+
+def test_generate_report_connection_stop_after_some_answers_keeps_old_wording() -> None:
+    """stop_reason 'connection' at probe 6 still says the host stopped answering."""
+    r = {**_redirects(sent=6, skipped=1, complete=False), "stop_reason": "connection"}
+    section = _redirect_section(_report(redirect_results=r))
+    assert ("[WARNING] Check incomplete: host stopped answering at probe 6 of 32; "
+            "the rest were not sent\n") in section
+    assert "timed out" not in section
+
+
 def test_generate_report_offsite_redirect_info_line() -> None:
     """An off-host redirect on the first probe gets an [INFO] line saying it was not tested."""
     r = {**_redirects(), "offsite_redirect": "https://www.example.com/"}

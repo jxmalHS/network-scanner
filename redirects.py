@@ -51,7 +51,7 @@ class RedirectResults(TypedDict):
     switch_reason: Literal["redirect", "no_http"] | None  # why probes went to https:// instead: "redirect", "no_http" or None
     # Optional so hand-built results (old tests) still work; check_open_redirect always fills them.
     http_probes_sent: NotRequired[int]   # probes sent over plain HTTP before switching to https:// (0 = no switch)
-    stop_reason: NotRequired[Literal["connection", "tls"] | None]  # why an incomplete check stopped
+    stop_reason: NotRequired[Literal["connection", "tls", "timeout"] | None]  # why an incomplete check stopped
     offsite_redirect: NotRequired[str | None]  # another host the first answered probe redirected to (never requested)
     vulnerable_meta_refresh: NotRequired[list[str]]    # probe URLs (also in vulnerable) caught by <meta refresh>
     vulnerable_refresh_header: NotRequired[list[str]]  # probe URLs (also in vulnerable) caught by a Refresh header
@@ -405,7 +405,7 @@ def _probe_all(
     answered_yet = False
     failures_in_a_row = 0
 
-    def stop(reason: Literal["connection", "tls"]) -> tuple[RedirectResults, Literal["no_http"] | None]:
+    def stop(reason: Literal["connection", "tls", "timeout"]) -> tuple[RedirectResults, Literal["no_http"] | None]:
         result["complete"] = False
         result["stop_reason"] = reason
         return result, ("no_http" if deciding else None)
@@ -432,10 +432,11 @@ def _probe_all(
                            if location is not None and not points_to_canary and not upgrade else None)
             except requests.exceptions.SSLError:
                 return stop("tls")          # certificate problems don't go away: stop at once
-            except requests.exceptions.ConnectionError:     # includes "connect timed out"
+            except requests.exceptions.ConnectionError as e:    # includes "connect timed out"
                 failures_in_a_row += 1
-                if failures_in_a_row >= FAILURES_TO_STOP:
-                    return stop("connection")   # host really gone: don't wait 32 x 5 s
+                if failures_in_a_row >= FAILURES_TO_STOP:      # host really gone: don't wait 32 x 5 s
+                    return stop("timeout" if isinstance(e, requests.exceptions.ConnectTimeout)
+                                else "connection")
                 result["probes_skipped"] += 1   # one dropped connection: skip it and go on
                 deciding = deciding and result["probes_sent"] < SWITCH_WINDOW
                 continue
