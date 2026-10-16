@@ -349,19 +349,22 @@ def test_main_prints_port_count_and_workers(
     assert "[*] Scanning 3 ports (5 at a time)...\n" in capsys.readouterr().out
 
 
+ABORT_MESSAGE = "[!] Scan interrupted by keyboard input (Ctrl+C) — stopped early, no report was written"
+
+
 # --- Ctrl+C: KeyboardInterrupt becomes a clean exit with code 130 -------------
 
 
 def test_main_ctrl_c_during_port_scan_exits_130_cleanly(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
 ) -> None:
-    """Ctrl+C in scan_ports exits 130 with '[!] Scan aborted', skips later checks, no traceback."""
+    """Ctrl+C in scan_ports exits 130 with the 'interrupted by keyboard input' message, skips later checks, no traceback."""
     checks["scan_ports"].side_effect = KeyboardInterrupt
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, "localhost")
     assert exc.value.code == 130
     captured = capsys.readouterr()
-    assert "[!] Scan aborted" in captured.out
+    assert ABORT_MESSAGE in captured.out
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
     for name in ("check_headers", "check_open_redirect", "check_ssl", "generate_report"):
@@ -376,16 +379,16 @@ def test_main_ctrl_c_during_ssl_check_exits_130_without_report(
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, "localhost")
     assert exc.value.code == 130
-    assert "[!] Scan aborted" in capsys.readouterr().out
+    assert ABORT_MESSAGE in capsys.readouterr().out
     checks["generate_report"].assert_not_called()
 
 
-def test_main_normal_run_does_not_print_aborted(
+def test_main_normal_run_does_not_print_interrupted(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
 ) -> None:
-    """A scan that finishes normally returns without SystemExit and never says 'Scan aborted'."""
+    """A scan that finishes normally returns without SystemExit and never says it was interrupted."""
     _run(monkeypatch, "localhost")  # would fail the test if SystemExit were raised
-    assert "Scan aborted" not in capsys.readouterr().out
+    assert "interrupted by keyboard input" not in capsys.readouterr().out
 
 
 def test_main_unresolvable_host_exits_1_without_other_checks(
@@ -434,7 +437,7 @@ def test_main_bad_host_still_exits_2_not_130(
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, "site.com/path")
     assert exc.value.code == 2
-    assert "Scan aborted" not in capsys.readouterr().out
+    assert "interrupted by keyboard input" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("value", ["fe80::1", "FE80::abcd", "febf::1", "ff02::1", "ff05::2", "224.0.0.1", "239.255.255.250", "255.255.255.255"])

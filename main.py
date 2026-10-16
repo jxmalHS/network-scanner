@@ -100,7 +100,8 @@ def main() -> None:
     try:
         had_internal_errors = run_scan(args)
     except KeyboardInterrupt:
-        print("\n[!] Scan aborted")   # \n: the terminal echoes ^C on the current line
+        # \n: the terminal echoes ^C on the current line
+        print("\n[!] Scan interrupted by keyboard input (Ctrl+C) — stopped early, no report was written")
         sys.exit(130)                  # 128 + 2 (SIGINT): the usual "stopped by Ctrl+C" code
     except HostResolutionError as e:
         print(f"\n[!] Could not resolve host: {e}")   # no report: there is nothing to assess
