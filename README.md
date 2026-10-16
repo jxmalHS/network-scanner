@@ -71,7 +71,7 @@ Link-local IPv6 addresses (`fe80::...`) aren't supported.
 
 | Code | Meaning |
 |---|---|
-| 0 | Scan finished and the report was written |
+| 0 | Scan finished and the report was written (also `--help`, which scans nothing) |
 | 1 | The host name could not be resolved (no report written) |
 | 2 | Bad arguments, e.g. an invalid host, port or `--workers` value (nothing scanned) |
 | 3 | Internal error: a bug in the scanner stopped one or more checks. The report was still written, but those sections are incomplete |
