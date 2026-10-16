@@ -220,7 +220,8 @@ def _write_report(path, host, open_ports, header_results, redirect_results, ssl_
                     f.write("[CRITICAL] Port 443 is closed — HTTPS is not enabled on this server\n")
                 elif ssl_results.get("error_kind") == "timeout":
                     f.write(f"Could not check the certificate: no answer on port 443 within "
-                            f"{SSL_TIMEOUT} s (filtered, or the server is slow)\n")
+                            f"{SSL_TIMEOUT} s (filtered, the server is slow, "
+                            "or the service there does not speak TLS)\n")
                 else:
                     f.write(f"Error checking SSL: {clean_text(ssl_results['error'])}\n")
             else:

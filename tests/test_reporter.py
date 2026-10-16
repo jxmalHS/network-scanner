@@ -624,7 +624,7 @@ def test_generate_report_ssl_refused_kind_ignores_messy_error_text() -> None:
 
 
 TIMEOUT_LINE = ("Could not check the certificate: no answer on port 443 within 5 s "
-                "(filtered, or the server is slow)\n")
+                "(filtered, the server is slow, or the service there does not speak TLS)\n")
 
 
 def test_generate_report_ssl_timeout_by_error_kind() -> None:
@@ -654,7 +654,8 @@ def test_generate_report_ssl_timeout_line_uses_ssl_timeout_value() -> None:
     """The seconds shown come from reporter.SSL_TIMEOUT (ssl_checker.TIMEOUT), not a hard-coded 5."""
     with patch.object(reporter, "SSL_TIMEOUT", 12):
         text = _report(ssl_results={"error": "timed out", "error_kind": "timeout"})
-    assert "no answer on port 443 within 12 s (filtered, or the server is slow)\n" in text
+    assert ("no answer on port 443 within 12 s (filtered, the server is slow, "
+            "or the service there does not speak TLS)\n") in text
 
 
 def test_generate_report_valid_ssl_cert() -> None:
