@@ -63,7 +63,7 @@ def _hsts_missing_reason(header: str, header_results: dict) -> str:
 
 
 def generate_report(host, open_ports, header_results, redirect_results, ssl_results, address=None,
-                    internal_errors=None):
+                    internal_errors=None, note=None):
     """Write the report and return its filename. The file appears complete or not at all."""
     # e.g. "::1" -> "__1" (":" is illegal in Windows filenames); [:100] keeps long names under
     # Windows' 255-character filename limit.
@@ -72,7 +72,7 @@ def generate_report(host, open_ports, header_results, redirect_results, ssl_resu
     tmp = filename + ".tmp"
     try:
         _write_report(tmp, host, open_ports, header_results, redirect_results, ssl_results, address,
-                      internal_errors or {})
+                      internal_errors or {}, note)
         _replace_with_retry(tmp, filename)   # one atomic rename: never a half-written report
     except BaseException:              # includes Ctrl+C; always re-raised after cleaning up
         with contextlib.suppress(OSError):
@@ -107,12 +107,14 @@ def _internal_error_line(detail: str) -> str:
 
 
 def _write_report(path, host, open_ports, header_results, redirect_results, ssl_results, address,
-                  internal_errors):
+                  internal_errors, note=None):
     """Write every report section to path."""
     with open(path, "w", encoding="utf-8") as f:
         f.write("Tamer - Network Vulnerability Scan Report\n")
         target = host if address in (None, host) else f"{host} ({address})"
         f.write(f"Target: {target}\n")
+        if note:                       # our own wording (no server text), e.g. what --ipv6 steered
+            f.write(f"{note}\n")
         f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("=" * 50 + "\n\n")
 

@@ -137,7 +137,7 @@ def test_main_passes_all_results_to_reporter(monkeypatch: pytest.MonkeyPatch, ch
     _run(monkeypatch, "localhost")
     checks["generate_report"].assert_called_once_with(
         "localhost", [], {"present": [], "missing": []}, REDIRECT_RESULTS, {"error": "refused"},
-        address="127.0.0.1", internal_errors={},
+        address="127.0.0.1", internal_errors={}, note=None,
     )
 
 
@@ -429,9 +429,9 @@ def test_main_link_local_only_host_exits_1_without_other_checks(
 
 
 def test_main_resolves_host_exactly_once(monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]) -> None:
-    """run_scan looks the name up once, with the host exactly as typed."""
+    """run_scan looks the name up once, with the host exactly as typed (and IPv6 off by default)."""
     _run(monkeypatch, "localhost")
-    checks["resolve_host"].assert_called_once_with("localhost")
+    checks["resolve_host"].assert_called_once_with("localhost", ipv6=False)
 
 
 def test_main_progress_line_shows_host_and_resolved_address(
@@ -906,6 +906,109 @@ def test_main_help_mentions_debug(
         _run(monkeypatch, "--help")
     assert exc.value.code == 0
     assert "--debug" in capsys.readouterr().out
+
+
+# --- --ipv6: port-scan the host's IPv6 address -------------------------------
+
+IPV6_NOTE = ("Note: only the port scan used ::1; the header, redirect and SSL checks "
+             "connect by name and the system picks the address.")
+
+
+def test_main_ipv6_flag_asks_resolve_host_for_ipv6(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """--ipv6 is passed to resolve_host as ipv6=True."""
+    checks["resolve_host"].return_value = (socket.AF_INET6, "::1")
+    _run(monkeypatch, "--ipv6", "localhost")
+    checks["resolve_host"].assert_called_once_with("localhost", ipv6=True)
+
+
+def test_main_ipv6_flag_port_scans_and_reports_the_ipv6_address(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """With --ipv6, scan_ports and generate_report both get the IPv6 address and the note."""
+    checks["resolve_host"].return_value = (socket.AF_INET6, "::1")
+    _run(monkeypatch, "--ipv6", "localhost")
+    checks["scan_ports"].assert_called_once_with("::1", main_module.COMMON_PORTS, 20)
+    kwargs = checks["generate_report"].call_args.kwargs
+    assert kwargs["address"] == "::1"
+    assert kwargs["note"] == IPV6_NOTE
+
+
+def test_main_ipv6_flag_prints_note_after_starting_scan(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """The note is printed as '[*] Note: ...' on the line right after 'Starting scan'."""
+    checks["resolve_host"].return_value = (socket.AF_INET6, "::1")
+    _run(monkeypatch, "--ipv6", "localhost")
+    out = capsys.readouterr().out
+    assert f"[*] Starting scan on localhost (::1)\n[*] {IPV6_NOTE}\n" in out
+
+
+def test_main_ipv6_flag_still_runs_other_checks_by_name(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """--ipv6 steers only the port scan: headers, redirects and SSL still get the host name."""
+    checks["resolve_host"].return_value = (socket.AF_INET6, "::1")
+    _run(monkeypatch, "--ipv6", "localhost")
+    checks["check_headers"].assert_called_once_with("localhost")
+    checks["check_open_redirect"].assert_called_once_with("localhost")
+    checks["check_ssl"].assert_called_once_with("localhost")
+
+
+def test_main_ipv6_flag_with_ipv4_literal_exits_2_without_resolving(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """'127.0.0.1 --ipv6' is an argument error: exit 2, stderr names --ipv6, nothing is looked up."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "127.0.0.1", "--ipv6")
+    assert exc.value.code == 2
+    assert "--ipv6" in capsys.readouterr().err
+    checks["resolve_host"].assert_not_called()
+    checks["scan_ports"].assert_not_called()
+
+
+def test_main_ipv6_flag_with_ipv6_literal_is_accepted_without_note(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """'::1 --ipv6' runs normally; the address equals the host, so there's no note."""
+    checks["resolve_host"].return_value = (socket.AF_INET6, "::1")
+    _run(monkeypatch, "::1", "--ipv6")
+    checks["resolve_host"].assert_called_once_with("::1", ipv6=True)
+    assert "Note:" not in capsys.readouterr().out
+    assert checks["generate_report"].call_args.kwargs["note"] is None
+
+
+def test_main_ipv6_flag_without_ipv6_address_exits_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """If the name has no IPv6 address, the 'over IPv6' error exits 1; nothing is scanned."""
+    message = "Can't scan v4only.example over IPv6: it has no IPv6 address that can be scanned"
+    checks["resolve_host"].side_effect = main_module.HostResolutionError(message)
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "v4only.example", "--ipv6")
+    assert exc.value.code == 1
+    assert f"\n[!] {message}\n" in capsys.readouterr().out
+    for name in ("scan_ports", "check_headers", "check_open_redirect", "check_ssl", "generate_report"):
+        checks[name].assert_not_called()
+
+
+def test_main_help_mentions_ipv6(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """--help lists the --ipv6 option."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--help")
+    assert exc.value.code == 0
+    assert "--ipv6" in capsys.readouterr().out
+
+
+def test_main_without_ipv6_flag_prints_no_note(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Without --ipv6 there is no 'Note:' line, even when the address differs from the host."""
+    _run(monkeypatch, "localhost")
+    assert "Note:" not in capsys.readouterr().out
 
 
 def test_main_debug_traceback_keeps_frame_indentation(

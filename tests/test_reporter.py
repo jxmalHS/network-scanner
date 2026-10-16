@@ -112,6 +112,27 @@ def test_generate_report_target_without_address_is_just_host(in_tmp_dir: Path) -
     assert _target_line(in_tmp_dir, "localhost") == "Target: localhost"
 
 
+def test_generate_report_note_is_on_line_after_target(in_tmp_dir: Path) -> None:
+    """note='Note: x' is written on its own line straight after 'Target: ...', before 'Date:'."""
+    filename = reporter.generate_report("localhost", [], NO_HEADERS, _redirects(), VALID_SSL,
+                                        address="::1", note="Note: x")
+    lines = (in_tmp_dir / filename).read_text(encoding="utf-8").splitlines()
+    assert lines[1] == "Target: localhost (::1)"
+    assert lines[2] == "Note: x"
+    assert lines[3].startswith("Date: ")
+
+
+def test_generate_report_no_note_keeps_header_unchanged(in_tmp_dir: Path) -> None:
+    """note=None gives the old header: title, Target, Date, separator - no extra line."""
+    filename = reporter.generate_report("localhost", [], NO_HEADERS, _redirects(), VALID_SSL,
+                                        address="127.0.0.1", note=None)
+    lines = (in_tmp_dir / filename).read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "Tamer - Network Vulnerability Scan Report"
+    assert lines[1] == "Target: localhost (127.0.0.1)"
+    assert re.fullmatch(r"Date: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", lines[2])
+    assert lines[3] == "=" * 50
+
+
 def test_generate_report_long_host_truncated_to_100_chars_in_filename(in_tmp_dir: Path) -> None:
     """A 253-char host (the DNS maximum) is cut to 100 chars in the filename, and the file is created."""
     filename = reporter.generate_report("a" * 253, [], NO_HEADERS, _redirects(), VALID_SSL)

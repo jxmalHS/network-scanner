@@ -558,3 +558,62 @@ def test_scan_ports_zero_workers_raises_value_error() -> None:
         with pytest.raises(ValueError):
             scanner.scan_ports("127.0.0.1", [80], workers=0)
     fake.assert_not_called()
+
+
+# --- resolve_host(ipv6=True): the --ipv6 flag --------------------------------
+
+
+def test_resolve_host_ipv6_picks_ipv6_when_ipv4_listed_first() -> None:
+    """With ipv6=True the IPv6 address wins, even though IPv4 comes first in the lookup."""
+    entries = [_addrinfo(socket.AF_INET, "127.0.0.1"), _addrinfo(socket.AF_INET6, "::1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_host("localhost", ipv6=True) == (socket.AF_INET6, "::1")
+
+
+def test_resolve_host_ipv6_skips_link_local_and_takes_next_global() -> None:
+    """With ipv6=True, fe80:: is skipped and the next global IPv6 address is returned (not IPv4)."""
+    entries = [_addrinfo(socket.AF_INET, "192.0.2.1"), _addrinfo(socket.AF_INET6, "fe80::1"),
+               _addrinfo(socket.AF_INET6, "2001:db8::1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_host("dual.example", ipv6=True) == (socket.AF_INET6, "2001:db8::1")
+
+
+def test_resolve_host_ipv6_on_ipv4_only_name_raises_over_ipv6_error() -> None:
+    """A name with only IPv4 addresses raises the 'over IPv6' error instead of falling back to IPv4."""
+    entries = [_addrinfo(socket.AF_INET, "192.0.2.1"), _addrinfo(socket.AF_INET, "192.0.2.2")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        with pytest.raises(scanner.HostResolutionError,
+                           match=r"^Can't scan v4only\.example over IPv6: it has no IPv6 address "
+                                 r"that can be scanned$"):
+            scanner.resolve_host("v4only.example", ipv6=True)
+
+
+def test_resolve_host_ipv6_with_only_link_local_ipv6_and_ipv4_raises() -> None:
+    """IPv4 plus only fe80:: IPv6: nothing usable over IPv6, so it raises rather than use IPv4."""
+    entries = [_addrinfo(socket.AF_INET6, "fe80::1"), _addrinfo(socket.AF_INET, "192.0.2.1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        with pytest.raises(scanner.HostResolutionError, match=r"over IPv6"):
+            scanner.resolve_host("mixed.example", ipv6=True)
+
+
+def test_resolve_host_ipv6_literal_with_ipv6_flag_skips_dns() -> None:
+    """An IPv6 literal with ipv6=True is returned as-is, without a DNS lookup."""
+    with patch("scanner.socket.getaddrinfo") as fake_dns:
+        assert scanner.resolve_host("::1", ipv6=True) == (socket.AF_INET6, "::1")
+    fake_dns.assert_not_called()
+
+
+def test_resolve_host_ipv4_literal_with_ipv6_flag_raises() -> None:
+    """An IPv4 literal with ipv6=True raises the 'over IPv6' error (and needs no DNS lookup)."""
+    with patch("scanner.socket.getaddrinfo") as fake_dns:
+        with pytest.raises(scanner.HostResolutionError, match=r"^Can't scan 127\.0\.0\.1 over IPv6"):
+            scanner.resolve_host("127.0.0.1", ipv6=True)
+    fake_dns.assert_not_called()
+
+
+def test_resolve_host_default_still_prefers_ipv4() -> None:
+    """Without ipv6=..., a dual-stack name still resolves to IPv4 (the default is unchanged)."""
+    entries = [_addrinfo(socket.AF_INET6, "::1"), _addrinfo(socket.AF_INET, "127.0.0.1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_host("localhost") == (socket.AF_INET, "127.0.0.1")
+        assert scanner.resolve_host("localhost", ipv6=False) == (socket.AF_INET, "127.0.0.1")

@@ -39,9 +39,17 @@ def _usable_addresses(host: str) -> list[tuple[int, str]]:
     return usable
 
 
-def resolve_host(host: str) -> tuple[int, str]:
-    """Return (address family, IP) for host. IP addresses skip the DNS lookup."""
+def resolve_host(host: str, ipv6: bool = False) -> tuple[int, str]:
+    """Return (address family, IP) for host. IP addresses skip the DNS lookup.
+
+    With ipv6=True, the first usable IPv6 address, or an error if there is none (never IPv4).
+    """
     addresses = _usable_addresses(host)
+    if ipv6:
+        found = [a for a in addresses if a[0] == socket.AF_INET6]
+        if not found:
+            raise HostResolutionError(f"Can't scan {host} over IPv6: it has no IPv6 address that can be scanned")
+        return found[0]
     # Prefer IPv4 when the name has one: many services (e.g. lab apps on localhost) listen
     # only on 127.0.0.1, and Windows lists ::1 first. IPv6 is used only if there is no IPv4.
     ipv4 = [a for a in addresses if a[0] == socket.AF_INET]

@@ -42,6 +42,14 @@ def valid_host(value: str) -> str:
     return value
 
 
+def _ip_version(value: str) -> int | None:
+    """4 or 6 if value is an IP address, None for a host name."""
+    try:
+        return ipaddress.ip_address(value).version
+    except ValueError:
+        return None
+
+
 MAX_WORKERS = 200
 MAX_PORT = 65535
 
@@ -101,7 +109,11 @@ def main() -> None:
                         help=f"Ports to check at the same time (1-{MAX_WORKERS}, default {DEFAULT_WORKERS})")
     parser.add_argument("--debug", action="store_true",
                         help="On an internal error, also print the full Python traceback (for bug reports)")
+    parser.add_argument("--ipv6", action="store_true",
+                        help="Port-scan the host's IPv6 address instead of its IPv4 one (stops if it has none)")
     args = parser.parse_args()
+    if args.ipv6 and _ip_version(args.host) == 4:
+        parser.error(f"--ipv6 can't be used with an IPv4 address: {args.host}")   # exits 2
 
     saved: dict[str, str] = {}          # run_scan fills in "report" once the file is on disk
     try:
@@ -198,10 +210,16 @@ def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
 
     # Look the name up once (raises HostResolutionError), so the port scan and the report
     # both use the same address. The other checks keep the name: TLS needs it.
-    _, address = resolve_host(host)
+    _, address = resolve_host(host, ipv6=args.ipv6)
     target = host if address == host else f"{host} ({address})"
+    # With --ipv6 only the port scan is steered; say so, so the Target line can't mislead.
+    note = (f"Note: only the port scan used {address}; the header, redirect and SSL checks "
+            f"connect by name and the system picks the address."
+            if args.ipv6 and address != host else None)
 
     print(f"\n[*] Starting scan on {target}")
+    if note:
+        print(f"[*] {note}")
 
     print(f"[*] Scanning {len(ports)} ports ({args.workers} at a time)...")
     open_ports = _run_check("the port scan", "ports", errors, scan_ports, address, ports, args.workers,
@@ -232,7 +250,7 @@ def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
     print("[*] Generating report...")
     try:
         filename = generate_report(host, open_ports, header_results, redirect_results, ssl_results,
-                                   address=address, internal_errors=errors)
+                                   address=address, internal_errors=errors, note=note)
     except OSError as e:               # PermissionError after the retries, disk full, ...
         raise ReportSaveError(clean_text(str(e))) from e
     saved["report"] = filename         # before any print: Ctrl+C can land from here on
