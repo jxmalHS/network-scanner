@@ -23,12 +23,13 @@ pip install -r requirements.txt
 
 ## Requirements
 
-- **Python 3.14 (recommended).** It's the only version the scanner is tested on, and the one where
-  the open redirect check is guaranteed to read HTML pages fully like a browser does (it uses
-  `HTMLParser(scripting=True)`).
+- **Python 3.14 (recommended).** It's the only version the scanner is tested on. Its HTML parser
+  has a `scripting=True` option that reads `<noscript>` the way a browser with JavaScript on does,
+  which the open redirect check uses. Python's parser is still not a full browser parser, so very
+  unusual HTML can be read differently on any version.
 - **Python 3.11 to 3.13 should also work, but aren't tested.** The code needs at least 3.11, and
   its libraries (`requests`, `urllib3`, `pytest`) need at least 3.10. On these versions a fallback
-  handles `<noscript>`, but very unusual HTML may be read slightly differently, because Python's
+  handles `<noscript>`, but unusual HTML is more likely to be read differently, because Python's
   built-in HTML parser has changed between versions.
 - **Python 3.10 and older won't run it.**
 
