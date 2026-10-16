@@ -781,3 +781,119 @@ def test_main_bug_before_report_saved_exits_5_and_says_no_report(
     out = capsys.readouterr().out
     assert "The scan stopped; no report was written." in out
     assert ALREADY_SAVED not in out
+
+
+# --- --debug: full traceback on stderr for internal errors only ----------------------
+
+DEBUG_PREFIX = "[debug] "
+
+
+def test_main_check_bug_without_debug_prints_no_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Without --debug a crashing check gives the one-line message only, no traceback."""
+    checks["check_ssl"].side_effect = ValueError("boom")
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "localhost")
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_main_debug_check_bug_prints_prefixed_traceback_and_still_reports(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """--debug + a crashing check: full traceback on stderr, every line prefixed, exit 3, report written."""
+    checks["check_ssl"].side_effect = ValueError("boom")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost", "--debug")
+    assert exc.value.code == 3
+    err = capsys.readouterr().err
+    assert "Traceback (most recent call last)" in err
+    assert "ValueError: boom" in err
+    assert all(line.startswith(DEBUG_PREFIX) for line in err.splitlines() if line)
+    checks["generate_report"].assert_called_once()
+
+
+def test_main_debug_catch_all_bug_prints_traceback_and_exits_5(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """--debug + a bug outside the checks (resolve_host): traceback on stderr, still exit 5."""
+    checks["resolve_host"].side_effect = RuntimeError("bug")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost", "--debug")
+    assert exc.value.code == 5
+    err = capsys.readouterr().err
+    assert "Traceback (most recent call last)" in err
+    assert "RuntimeError: bug" in err
+
+
+def test_main_debug_traceback_cannot_inject_escape_codes_or_fake_results(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Host-controlled text in the error message can't clear the screen or fake a '[+]' line."""
+    checks["check_headers"].side_effect = ValueError("evil\x1b[2J\n[+] Port 1 open")
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "localhost", "--debug")
+    err = capsys.readouterr().err
+    assert "Traceback" in err                     # the traceback really was printed
+    assert "\x1b" not in err
+    assert not any(line.startswith("[+]") for line in err.splitlines())
+
+
+def test_main_debug_report_save_error_exits_4_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A report-save failure is not a bug, so --debug adds no traceback; still exit 4."""
+    checks["generate_report"].side_effect = PermissionError(13, "Permission denied", "report_x.txt.tmp")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost", "--debug")
+    assert exc.value.code == 4
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_main_debug_ctrl_c_exits_130_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Ctrl+C is not a bug, so --debug adds no traceback; still exit 130."""
+    checks["check_headers"].side_effect = KeyboardInterrupt
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "localhost", "--debug")
+    assert exc.value.code == 130
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_main_debug_does_not_change_check_arguments(
+    monkeypatch: pytest.MonkeyPatch, checks: dict[str, MagicMock]
+) -> None:
+    """--debug only affects error output: the checks get exactly the same arguments as without it."""
+    _run(monkeypatch, "localhost", "--debug")
+    checks["scan_ports"].assert_called_once_with("127.0.0.1", main_module.COMMON_PORTS, 20)
+    checks["check_headers"].assert_called_once_with("localhost")
+    checks["check_open_redirect"].assert_called_once_with("localhost")
+    checks["check_ssl"].assert_called_once_with("localhost")
+
+
+def test_main_help_mentions_debug(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """--help lists the --debug option (argparse prints help and exits 0)."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--help")
+    assert exc.value.code == 0
+    assert "--debug" in capsys.readouterr().out
+
+
+def test_main_debug_traceback_keeps_frame_indentation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """Traceback frame lines keep their 2-space indent after the prefix, so it stays readable."""
+    checks["check_ssl"].side_effect = ValueError("boom")
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "localhost", "--debug")
+    err = capsys.readouterr().err
+    assert any(line.startswith(DEBUG_PREFIX + "  File ") for line in err.splitlines())

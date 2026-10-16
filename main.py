@@ -99,6 +99,8 @@ def main() -> None:
     parser.add_argument("--ports", nargs="+", type=port_number, default=COMMON_PORTS, help="Ports to scan")
     parser.add_argument("--workers", type=worker_count, default=DEFAULT_WORKERS,
                         help=f"Ports to check at the same time (1-{MAX_WORKERS}, default {DEFAULT_WORKERS})")
+    parser.add_argument("--debug", action="store_true",
+                        help="On an internal error, also print the full Python traceback (for bug reports)")
     args = parser.parse_args()
 
     saved: dict[str, str] = {}          # run_scan fills in "report" once the file is on disk
@@ -124,9 +126,22 @@ def main() -> None:
                   else "; no report was written")
         print(f"\n[!] Internal error: {_bug_detail(e)} — this is a bug in the scanner, "
               f"please report it. The scan stopped{report}.")
+        if args.debug:
+            _print_traceback(e)
         sys.exit(5)
     if had_internal_errors:
         sys.exit(3)                    # report written, but some checks hit a bug (see README table)
+
+
+def _print_traceback(e: BaseException) -> None:
+    """The full traceback on stderr, one cleaned line at a time, each starting with "[debug] ".
+
+    Error messages can carry text from the scanned host, so every line goes through clean_text
+    (its indentation is put back afterwards), and the prefix stops any line posing as a result.
+    """
+    for line in "".join(traceback.format_exception(e)).splitlines():
+        indent = len(line) - len(line.lstrip(" "))
+        print(f"[debug] {' ' * indent}{clean_text(line)}", file=sys.stderr)
 
 
 def _bug_detail(e: Exception) -> str:
@@ -136,7 +151,7 @@ def _bug_detail(e: Exception) -> str:
             f"({os.path.basename(frame.filename)} line {frame.lineno})")
 
 
-def _run_check(label: str, key: str, errors: dict[str, str], func, *args):
+def _run_check(label: str, key: str, errors: dict[str, str], func, *args, debug: bool = False):
     """Run one check; if it crashes because of a bug in the scanner, say so loudly and go on.
 
     The other checks still run and the report is still written, but the bug is shown on the
@@ -151,6 +166,8 @@ def _run_check(label: str, key: str, errors: dict[str, str], func, *args):
         detail = _bug_detail(e)
         print(f"[!] Internal error in {label}: {detail} — this is a bug in the scanner, "
               f"please report it")
+        if debug:
+            _print_traceback(e)
         errors[key] = detail
         return None
 
@@ -173,7 +190,8 @@ def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
     print(f"\n[*] Starting scan on {target}")
 
     print(f"[*] Scanning {len(ports)} ports ({args.workers} at a time)...")
-    open_ports = _run_check("the port scan", "ports", errors, scan_ports, address, ports, args.workers)
+    open_ports = _run_check("the port scan", "ports", errors, scan_ports, address, ports, args.workers,
+                            debug=args.debug)
     for entry in open_ports or []:
         if entry["banner"]:
             print(f"[+] Port {entry['port']} open — {entry['banner'][:50]}")
@@ -183,16 +201,19 @@ def run_scan(args: argparse.Namespace, saved: dict[str, str]) -> bool:
             print(f"[+] Port {entry['port']} open — no banner")
 
     print("[*] Checking security headers...")
-    header_results = _run_check("the header check", "headers", errors, check_headers, host)
+    header_results = _run_check("the header check", "headers", errors, check_headers, host,
+                                debug=args.debug)
 
     print("[*] Checking for open redirects...")
-    redirect_results = _run_check("the redirect check", "redirects", errors, check_open_redirect, host)
+    redirect_results = _run_check("the redirect check", "redirects", errors, check_open_redirect, host,
+                                  debug=args.debug)
     if redirect_results is not None and (
             not redirect_results["complete"] or redirect_results["probes_skipped"] > 0):
         print("[!] Redirect check incomplete — see the report for details")
 
     print("[*] Checking SSL/TLS certificate...")
-    ssl_results = _run_check("the SSL/TLS check", "ssl", errors, check_ssl, host)
+    ssl_results = _run_check("the SSL/TLS check", "ssl", errors, check_ssl, host,
+                             debug=args.debug)
 
     print("[*] Generating report...")
     try:
