@@ -4,6 +4,8 @@ import socket
 from datetime import datetime, timedelta, timezone
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+# OpenSSL reasons meaning the service on 443 answered, but not with TLS (e.g. plain HTTP).
+_NOT_TLS_REASONS = frozenset({"WRONG_VERSION_NUMBER"})
 
 
 def _name_matches(pattern: str, host: str) -> bool:
@@ -114,4 +116,7 @@ def check_ssl(host):
             result["error_kind"] = "refused"
         elif isinstance(e, TimeoutError):      # socket.timeout too: connect or TLS handshake
             result["error_kind"] = "timeout"
+        elif isinstance(e, ssl.SSLError) and getattr(e, "reason", None) in _NOT_TLS_REASONS:
+            # reason is OpenSSL's short code; the message text never counts, like above.
+            result["error_kind"] = "not_tls"
         return result

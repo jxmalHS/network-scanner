@@ -259,6 +259,9 @@ def _write_report(path, host, open_ports, header_results, redirect_results, ssl_
                     f.write(f"Could not check the certificate: no answer on port 443 within "
                             f"{SSL_TIMEOUT} s (filtered, the server is slow, "
                             "or the service there does not speak TLS)\n")
+                elif ssl_results.get("error_kind") == "not_tls":
+                    f.write("[WARNING] Port 443 is open but doesn't speak HTTPS (TLS); "
+                            "it may be serving plain HTTP\n")
                 else:
                     f.write(f"Error checking SSL: {clean_text(ssl_results['error'])}\n")
             else:

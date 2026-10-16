@@ -237,7 +237,8 @@ def test_check_ssl_connection_refused_returns_error() -> None:
     ssl.SSLError(1, "wrong version number"),
 ])
 def test_check_ssl_other_errors_have_no_error_kind(err: Exception) -> None:
-    """Only refusals and timeouts get error_kind; other failures (even saying 'refused') don't."""
+    """Only refusals, timeouts and non-TLS replies get error_kind; other failures (even saying
+    'refused' or 'wrong version number') don't."""
     with patch("ssl_checker.socket.create_connection", side_effect=err):
         result = ssl_checker.check_ssl("example.com")
     assert "error" in result
@@ -274,6 +275,39 @@ def test_check_ssl_handshake_timeout_has_error_kind_timeout() -> None:
         result = ssl_checker.check_ssl("example.com")
     assert result["error_kind"] == "timeout"
     assert "handshake operation timed out" in result["error"]
+
+
+def _ssl_error(reason: str | None) -> ssl.SSLError:
+    """An ssl.SSLError like OpenSSL raises, with .reason set (None = no reason, as hand-built)."""
+    err = ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1000)")
+    if reason is not None:
+        err.reason = reason
+    return err
+
+
+def test_check_ssl_wrong_version_number_has_error_kind_not_tls() -> None:
+    """A handshake failing with reason WRONG_VERSION_NUMBER (e.g. plain HTTP on 443) is 'not_tls'."""
+    context = MagicMock()
+    context.wrap_socket.side_effect = _ssl_error("WRONG_VERSION_NUMBER")
+    with patch("ssl_checker.ssl.create_default_context", return_value=context), patch(
+        "ssl_checker.socket.create_connection"
+    ):
+        result = ssl_checker.check_ssl("example.com")
+    assert result["error_kind"] == "not_tls"
+    assert "wrong version number" in result["error"]
+
+
+@pytest.mark.parametrize("reason", [None, "UNSUPPORTED_PROTOCOL"])
+def test_check_ssl_other_ssl_reasons_have_no_error_kind(reason: str | None) -> None:
+    """No reason, or a different one, gets no error_kind, even if the text says 'wrong version'."""
+    context = MagicMock()
+    context.wrap_socket.side_effect = _ssl_error(reason)
+    with patch("ssl_checker.ssl.create_default_context", return_value=context), patch(
+        "ssl_checker.socket.create_connection"
+    ):
+        result = ssl_checker.check_ssl("example.com")
+    assert "error" in result
+    assert "error_kind" not in result
 
 
 def test_check_ssl_connect_uses_module_timeout() -> None:

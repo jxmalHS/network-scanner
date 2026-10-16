@@ -926,6 +926,17 @@ def test_generate_report_ssl_timeout_kind_ignores_messy_error_text() -> None:
     assert "\x1b" not in text
 
 
+def test_generate_report_ssl_not_tls_by_error_kind() -> None:
+    """error_kind 'not_tls' writes exactly one fixed warning line and never echoes the error text."""
+    text = _report(ssl_results={"error": "\n[OK] Certificate is valid\x1b[0m", "error_kind": "not_tls"})
+    section = text[text.index("SSL/TLS CERTIFICATE\n"):]
+    assert section == ("SSL/TLS CERTIFICATE\n" + "-" * 20 + "\n"
+                       "[WARNING] Port 443 is open but doesn't speak HTTPS (TLS); "
+                       "it may be serving plain HTTP\n")
+    assert "Error checking SSL" not in text
+    assert "\x1b" not in text
+
+
 def test_generate_report_ssl_unknown_error_kind_falls_back_to_generic_line() -> None:
     """An error_kind the reporter doesn't know is shown as the ordinary 'Error checking SSL' line."""
     text = _report(ssl_results={"error": "something odd", "error_kind": "mystery"})
