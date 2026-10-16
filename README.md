@@ -83,7 +83,8 @@ If the name has no IPv6 address, the scan stops with exit code 1 rather than qui
 Your own machine needs working IPv6 too: without it every port fails to connect and looks closed.
 
 To port-scan **both** addresses, use `--dual-stack`. Open ports are listed per address in the
-report, which shows when a firewall treats IPv4 and IPv6 differently:
+report, which can show when a firewall treats IPv4 and IPv6 differently. Ports open only on IPv4
+can also just mean your own machine or network has no working IPv6 (see above), so check that first:
 
 ```powershell
 python main.py scanme.nmap.org --dual-stack
@@ -95,7 +96,7 @@ can't be combined with `--ipv6` or used with an IP address (exit code 2). Only s
 allowed to test: in rare setups a name's IPv6 address is a different machine (e.g. a CDN).
 
 The header, redirect and certificate checks always connect by name, so your operating system picks
-which address they use, with or without `--ipv6`; the report says so when `--ipv6` is used. To make
+which address they use, with or without `--ipv6`/`--dual-stack`; the report says so when either flag is used. To make
 every check use one address, pass the address itself, e.g. `python main.py ::1`. The certificate's
 name check will then report a mismatch, because certificates are issued for names, not raw addresses.
 
