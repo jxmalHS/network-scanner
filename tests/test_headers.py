@@ -64,6 +64,11 @@ def test_hsts_min_max_age_is_six_months() -> None:
     assert headers.HSTS_MIN_MAX_AGE == 15_768_000
 
 
+def test_hsts_preload_min_max_age_is_one_year() -> None:
+    """The preload-list max-age bar is pinned at 31,536,000 seconds (365 days)."""
+    assert headers.HSTS_PRELOAD_MIN_MAX_AGE == 31_536_000
+
+
 # --- _hsts_max_age (parsing the HSTS header value) ---------------------------
 
 @pytest.mark.parametrize(("value", "expected"), [
@@ -108,6 +113,9 @@ def test_check_headers_all_present_over_https() -> None:
     assert result == {
         "hsts_max_age": 31536000,
         "hsts_short": False,
+        "hsts_include_subdomains": False,   # GOOD_HSTS is bare "max-age=31536000"
+        "hsts_preload": False,
+        "hsts_preload_short": False,
         "url": "https://example.com",
         "present": headers.SECURITY_HEADERS,
         "missing": [],
@@ -537,6 +545,109 @@ def test_check_headers_hsts_over_plain_http_has_no_max_age_key() -> None:
         result = headers.check_headers("example.com")
     assert result["not_applicable"] == [HSTS]
     assert "hsts_max_age" not in result
+
+
+# --- HSTS includeSubDomains / preload ----------------------------------------
+
+DIRECTIVE_KEYS = ("hsts_include_subdomains", "hsts_preload", "hsts_preload_short")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("max-age=31536000; includeSubDomains; preload",
+         {"max-age", "includesubdomains", "preload"}),
+        ("MAX-AGE=1; INCLUDESUBDOMAINS; PRELOAD", {"max-age", "includesubdomains", "preload"}),
+        ("  max-age = 1 ;   preload  ", {"max-age", "preload"}),
+        ("max-age=1;; ;preload;", {"max-age", "preload"}),
+        ("max-age=1, max-age=2; includeSubDomains; preload", {"max-age"}),
+        ('max-age=1; "preload"', {"max-age", '"preload"'}),
+        ("max-age=1; preload=yes", {"max-age", "preload"}),
+        ("", set()),
+    ],
+    ids=["all-three", "upper-case", "spaces", "empty-segments", "first-header-only",
+         "quoted-not-preload", "preload-with-value", "empty"],
+)
+def test_hsts_directive_names(value: str, expected: set[str]) -> None:
+    """Names are lower-cased, stripped, cut at '=', taken from the first header only."""
+    assert headers._hsts_directive_names(value) == expected
+
+
+def test_check_headers_hsts_full_preload_ready() -> None:
+    """1 year + includeSubDomains + preload: all directive notes say it is preload-ready."""
+    result = _check_with_hsts("max-age=31536000; includeSubDomains; preload")
+    assert result["hsts_include_subdomains"] is True
+    assert result["hsts_preload"] is True
+    assert result["hsts_preload_short"] is False
+
+
+def test_check_headers_hsts_six_month_preload_is_preload_short() -> None:
+    """preload with a 6-month max-age is too short for the preload list."""
+    result = _check_with_hsts("max-age=15768000; includeSubDomains; preload")
+    assert result["hsts_preload"] is True
+    assert result["hsts_preload_short"] is True
+
+
+@pytest.mark.parametrize(
+    ("max_age", "expected_short"),
+    [(31_535_999, True), (31_536_000, False)],
+)
+def test_check_headers_hsts_preload_short_boundary(max_age: int, expected_short: bool) -> None:
+    """One second under a year is preload_short; exactly a year is not."""
+    result = _check_with_hsts(f"max-age={max_age}; includeSubDomains; preload")
+    assert result["hsts_preload_short"] is expected_short
+
+
+def test_check_headers_hsts_no_preload_is_never_preload_short() -> None:
+    """Without preload, a short max-age doesn't set preload_short (nothing asked to be preloaded)."""
+    result = _check_with_hsts("max-age=300; includeSubDomains")
+    assert result["hsts_preload"] is False
+    assert result["hsts_preload_short"] is False
+    assert result["hsts_include_subdomains"] is True
+
+
+def test_check_headers_hsts_directive_names_any_case() -> None:
+    """Directive names match in any letter case."""
+    result = _check_with_hsts("MAX-AGE=31536000; INCLUDESUBDOMAINS; PreLoad")
+    assert result["hsts_include_subdomains"] is True
+    assert result["hsts_preload"] is True
+    assert result["hsts_preload_short"] is False
+
+
+@pytest.mark.parametrize(
+    "hsts_value",
+    ["max-age=0; includeSubDomains; preload", "max-age=soon; includeSubDomains; preload"],
+    ids=["max-age-zero", "unreadable"],
+)
+def test_check_headers_invalid_hsts_has_no_directive_keys(hsts_value: str) -> None:
+    """HSTS that doesn't count (max-age 0 or unreadable) gets no directive notes."""
+    result = _check_with_hsts(hsts_value)
+    assert HSTS in result["missing"]
+    for key in DIRECTIVE_KEYS:
+        assert key not in result
+
+
+def test_check_headers_no_hsts_sent_has_no_directive_keys() -> None:
+    """HSTS not sent at all: no directive notes."""
+    with patch("headers.requests.get", return_value=_response({"X-Frame-Options": "DENY"})):
+        result = headers.check_headers("example.com")
+    for key in DIRECTIVE_KEYS:
+        assert key not in result
+
+
+def test_check_headers_hsts_over_plain_http_has_no_directive_keys() -> None:
+    """HSTS sent over plain HTTP is N/A, so its directives are not judged."""
+    with patch(
+        "headers.requests.get",
+        side_effect=[
+            requests.exceptions.ConnectionError("refused"),
+            _response({HSTS: "max-age=31536000; includeSubDomains; preload"}),
+        ],
+    ):
+        result = headers.check_headers("example.com")
+    assert result["not_applicable"] == [HSTS]
+    for key in DIRECTIVE_KEYS:
+        assert key not in result
 
 
 # --- too-many-redirects flag on the HTTPS attempt ----------------------------

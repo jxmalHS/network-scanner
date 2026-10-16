@@ -19,6 +19,18 @@ MAX_REDIRECTS = 5
 
 # HSTS shorter than about 6 months (Mozilla Observatory's bar) gets a warning.
 HSTS_MIN_MAX_AGE = 15_768_000
+# hstspreload.org only accepts preload with includeSubDomains and a max-age of at least 1 year.
+HSTS_PRELOAD_MIN_MAX_AGE = 31_536_000
+
+
+def _hsts_directive_names(value: str) -> set[str]:
+    """Lower-cased directive names in the first HSTS header (split like _hsts_max_age).
+
+    Names are tokens in RFC 6797 (only values may be quoted), so '"preload"' is not preload.
+    A value after a name ('preload=yes') is ignored; only the name counts.
+    """
+    first = value.split(",", 1)[0]
+    return {part.partition("=")[0].strip().lower() for part in first.split(";") if part.strip()}
 
 
 def _hsts_max_age(value: str) -> int | None:
@@ -104,6 +116,11 @@ def _fetch(url: str) -> dict:
             max_age = _hsts_max_age(headers[header])
             notes["hsts_max_age"] = max_age
             notes["hsts_short"] = bool(max_age) and max_age < HSTS_MIN_MAX_AGE
+            if max_age:   # only a present, valid HSTS gets judged further
+                names = _hsts_directive_names(headers[header])
+                notes["hsts_include_subdomains"] = "includesubdomains" in names
+                notes["hsts_preload"] = "preload" in names
+                notes["hsts_preload_short"] = "preload" in names and max_age < HSTS_PRELOAD_MIN_MAX_AGE
             (present if max_age else missing).append(header)
         elif header in headers:
             present.append(header)

@@ -33,6 +33,26 @@ def _timeout_text(seconds: int) -> str:
     return f"timed out: no answer within {seconds} s"
 
 
+def _hsts_directive_line(header_results: dict) -> str:
+    """One line about includeSubDomains/preload for a present, valid HSTS, or "" if nothing to say.
+
+    Only real True/False notes count (headers.py decides; odd values are ignored, not trusted).
+    """
+    if header_results.get("hsts_preload") is True:
+        problems = []
+        if header_results.get("hsts_include_subdomains") is False:
+            problems.append("no includeSubDomains")
+        if header_results.get("hsts_preload_short") is True:
+            problems.append("max-age is under 1 year")
+        if not problems:
+            return ""
+        return ("[WARNING] HSTS asks to be preloaded but doesn't meet the preload list's rules: "
+                + ", and ".join(problems) + "\n")
+    if header_results.get("hsts_include_subdomains") is False:
+        return "[INFO] HSTS does not cover subdomains (no includeSubDomains)\n"
+    return ""
+
+
 def _hsts_missing_reason(header: str, header_results: dict) -> str:
     """Extra text for a [MISSING] HSTS line when the header was sent but doesn't count."""
     if header != "Strict-Transport-Security" or "hsts_max_age" not in header_results:
@@ -148,6 +168,8 @@ def _write_report(path, host, open_ports, header_results, redirect_results, ssl_
                                 f"6 months or more is recommended\n")
                     else:   # flag set without a usable number: still warn, don't crash
                         f.write("[WARNING] HSTS max-age is shorter than recommended (6 months or more)\n")
+                if "Strict-Transport-Security" in header_results["present"]:
+                    f.write(_hsts_directive_line(header_results))
                 for header in header_results["missing"]:
                     f.write(f"[MISSING] {header}{_hsts_missing_reason(header, header_results)}\n")
                 for header in header_results.get("not_applicable", []):

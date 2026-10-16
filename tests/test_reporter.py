@@ -221,13 +221,16 @@ def test_generate_report_tls_problem_wins_over_too_many_redirects() -> None:
 
 # --- HSTS max-age wording ----------------------------------------------------
 
-def _hsts_report(max_age: Any, present: bool, short: bool = False) -> str:
-    """Report over HTTPS with HSTS present or missing, the given hsts_max_age and hsts_short flag."""
+def _hsts_report(max_age: Any, present: bool, short: bool = False, **extra: Any) -> str:
+    """Report over HTTPS with HSTS present or missing, the given hsts_max_age and hsts_short flag.
+
+    Any **extra keys (e.g. hsts_preload=True) are added to the header result as-is.
+    """
     hsts = ["Strict-Transport-Security"]
     return _report(header_results={
         "url": "https://example.com", "hsts_max_age": max_age, "hsts_short": short,
         "present": hsts if present else [], "missing": [] if present else hsts,
-        "not_applicable": [],
+        "not_applicable": [], **extra,
     })
 
 
@@ -271,6 +274,101 @@ def test_generate_report_no_hsts_warning_without_max_age_key() -> None:
     text = _report(header_results={"present": ["Strict-Transport-Security"], "missing": []})
     assert "[PRESENT] Strict-Transport-Security\n" in text
     assert "HSTS max-age is only" not in text
+
+
+# --- HSTS includeSubDomains / preload wording --------------------------------
+
+ONE_YEAR = 31_536_000
+NO_SUBDOMAINS_INFO = "[INFO] HSTS does not cover subdomains (no includeSubDomains)\n"
+PRELOAD_WARNING = "[WARNING] HSTS asks to be preloaded but doesn't meet the preload list's rules: "
+
+
+def test_generate_report_hsts_no_include_subdomains_info_line() -> None:
+    """Present HSTS without includeSubDomains (and no preload): the [INFO] line, after [PRESENT]."""
+    text = _hsts_report(ONE_YEAR, present=True, hsts_include_subdomains=False,
+                        hsts_preload=False, hsts_preload_short=False)
+    assert "[PRESENT] Strict-Transport-Security\n" + NO_SUBDOMAINS_INFO in text
+
+
+def test_generate_report_hsts_include_subdomains_no_line() -> None:
+    """includeSubDomains present and no preload: nothing extra to say."""
+    text = _hsts_report(ONE_YEAR, present=True, hsts_include_subdomains=True,
+                        hsts_preload=False, hsts_preload_short=False)
+    assert "subdomains" not in text
+    assert "preload" not in text
+
+
+def test_generate_report_hsts_preload_ready_no_line() -> None:
+    """preload with includeSubDomains and a year's max-age meets the rules: no line."""
+    text = _hsts_report(ONE_YEAR, present=True, hsts_include_subdomains=True,
+                        hsts_preload=True, hsts_preload_short=False)
+    assert "preload" not in text
+    assert "[INFO] HSTS" not in text
+
+
+@pytest.mark.parametrize(
+    ("include", "preload_short", "reason"),
+    [
+        (False, False, "no includeSubDomains"),
+        (True, True, "max-age is under 1 year"),
+        (False, True, "no includeSubDomains, and max-age is under 1 year"),
+    ],
+    ids=["no-include", "too-short", "both"],
+)
+def test_generate_report_hsts_preload_warning_wording(
+    include: bool, preload_short: bool, reason: str
+) -> None:
+    """Each preload problem (or both) gets the exact warning wording, and no [INFO] line too."""
+    text = _hsts_report(ONE_YEAR, present=True, hsts_include_subdomains=include,
+                        hsts_preload=True, hsts_preload_short=preload_short)
+    assert "[PRESENT] Strict-Transport-Security\n" + PRELOAD_WARNING + reason + "\n" in text
+    assert text.count(PRELOAD_WARNING) == 1
+    assert NO_SUBDOMAINS_INFO not in text
+
+
+def test_generate_report_hsts_old_style_result_no_directive_line() -> None:
+    """A result without the directive keys (older shape): no [INFO] or preload line."""
+    text = _hsts_report(ONE_YEAR, present=True)
+    assert NO_SUBDOMAINS_INFO not in text
+    assert PRELOAD_WARNING not in text
+
+
+def test_generate_report_hsts_missing_ignores_directive_keys() -> None:
+    """HSTS in missing: directive keys are ignored even if a caller passes them."""
+    text = _hsts_report(0, present=False, hsts_include_subdomains=False,
+                        hsts_preload=True, hsts_preload_short=True)
+    assert NO_SUBDOMAINS_INFO not in text
+    assert PRELOAD_WARNING not in text
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"hsts_preload": "yes", "hsts_include_subdomains": 0, "hsts_preload_short": 1},
+        {"hsts_preload": 1, "hsts_include_subdomains": None, "hsts_preload_short": "true"},
+        {"hsts_preload": False, "hsts_include_subdomains": 0},
+        {"hsts_preload": False, "hsts_include_subdomains": ""},
+    ],
+    ids=["strings-and-ints", "one-none-string", "include-zero", "include-empty-string"],
+)
+def test_generate_report_hsts_non_bool_directive_values_no_line(extra: dict[str, Any]) -> None:
+    """Only real True/False count: truthy/falsy look-alikes produce no line."""
+    text = _hsts_report(ONE_YEAR, present=True, **extra)
+    assert NO_SUBDOMAINS_INFO not in text
+    assert PRELOAD_WARNING not in text
+
+
+def test_generate_report_hsts_lines_in_order() -> None:
+    """[PRESENT], then the short max-age warning, then the preload warning."""
+    text = _hsts_report(172800, present=True, short=True, hsts_include_subdomains=True,
+                        hsts_preload=True, hsts_preload_short=True)
+    expected = (
+        "[PRESENT] Strict-Transport-Security\n"
+        "[WARNING] HSTS max-age is only 172800 seconds (about 2 days); "
+        "6 months or more is recommended\n"
+        + PRELOAD_WARNING + "max-age is under 1 year\n"
+    )
+    assert expected in text
 
 
 def test_generate_report_writes_checked_url() -> None:
