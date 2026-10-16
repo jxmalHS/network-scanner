@@ -396,11 +396,31 @@ def test_main_unresolvable_host_exits_1_without_other_checks(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
 ) -> None:
     """HostResolutionError from resolve_host exits 1 with a clear message; nothing else runs, no report."""
-    checks["resolve_host"].side_effect = main_module.HostResolutionError("no-such-host.invalid (failed)")
+    checks["resolve_host"].side_effect = main_module.HostResolutionError(
+        "Could not resolve host: no-such-host.invalid (failed)")
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, "no-such-host.invalid")
     assert exc.value.code == 1
-    assert "[!] Could not resolve host: no-such-host.invalid (failed)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "\n[!] Could not resolve host: no-such-host.invalid (failed)\n" in out
+    assert "Could not resolve host: Could not resolve host" not in out   # the prefix isn't doubled
+    for name in ("scan_ports", "check_headers", "check_open_redirect", "check_ssl", "generate_report"):
+        checks[name].assert_not_called()
+
+
+def test_main_link_local_only_host_exits_1_without_other_checks(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checks: dict[str, MagicMock]
+) -> None:
+    """A name with only unscannable addresses exits 1, prints the 'Can't scan' sentence, runs nothing."""
+    message = ("Can't scan printer.local: it only has link-local IPv6 (fe80::...), multicast or "
+               "broadcast addresses, which aren't a single host you can port-scan")
+    checks["resolve_host"].side_effect = main_module.HostResolutionError(message)
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "printer.local")
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert f"\n[!] {message}\n" in out
+    assert "Could not resolve host" not in out
     for name in ("scan_ports", "check_headers", "check_open_redirect", "check_ssl", "generate_report"):
         checks[name].assert_not_called()
 

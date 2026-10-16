@@ -8,25 +8,44 @@ DEFAULT_WORKERS = 20
 
 
 class HostResolutionError(Exception):
-    """The target name could not be turned into an IP address."""
+    """The target name gave no address that can be scanned. The message is a full sentence."""
 
 
-def resolve_host(host: str) -> tuple[int, str]:
-    """Return (address family, IP) for host. IP addresses skip the DNS lookup."""
+def is_unscannable(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Link-local IPv6 (needs a zone ID), multicast, or IPv4 broadcast: not one host you can port-scan."""
+    return ((ip.version == 6 and ip.is_link_local) or ip.is_multicast
+            or ip == ipaddress.IPv4Address("255.255.255.255"))
+
+
+def _usable_addresses(host: str) -> list[tuple[int, str]]:
+    """(family, IP) pairs for host in lookup order, minus ones that can't be scanned. IPs skip DNS."""
     try:
         ip = ipaddress.ip_address(host)
-        return (socket.AF_INET6 if ip.version == 6 else socket.AF_INET), str(ip)
+        return [((socket.AF_INET6 if ip.version == 6 else socket.AF_INET), str(ip))]
     except ValueError:
         pass
     try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except (OSError, UnicodeError) as e:   # gaierror is an OSError; an over-long label gives UnicodeError
-        raise HostResolutionError(f"{host} ({e})") from e
+        raise HostResolutionError(f"Could not resolve host: {host} ({e})") from e
+    if not infos:
+        raise HostResolutionError(f"Could not resolve host: {host} (the lookup returned no addresses)")
+    usable = [(info[0], info[4][0]) for info in infos
+              if not is_unscannable(ipaddress.ip_address(info[4][0]))]
+    if not usable:
+        raise HostResolutionError(
+            f"Can't scan {host}: it only has link-local IPv6 (fe80::...), multicast or broadcast "
+            f"addresses, which aren't a single host you can port-scan")
+    return usable
+
+
+def resolve_host(host: str) -> tuple[int, str]:
+    """Return (address family, IP) for host. IP addresses skip the DNS lookup."""
+    addresses = _usable_addresses(host)
     # Prefer IPv4 when the name has one: many services (e.g. lab apps on localhost) listen
     # only on 127.0.0.1, and Windows lists ::1 first. IPv6 is used only if there is no IPv4.
-    ipv4 = [info for info in infos if info[0] == socket.AF_INET]
-    family, _, _, _, sockaddr = (ipv4 or infos)[0]
-    return family, sockaddr[0]
+    ipv4 = [a for a in addresses if a[0] == socket.AF_INET]
+    return (ipv4 or addresses)[0]
 
 
 def scan_port(host, port, family=socket.AF_INET):

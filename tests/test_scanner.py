@@ -1,4 +1,5 @@
 """Tests for scanner.py - TCP connect scan and banner grabbing (socket fully mocked)."""
+import ipaddress
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -234,7 +235,8 @@ def test_resolve_host_gaierror_becomes_host_resolution_error() -> None:
     """A DNS failure (gaierror) is re-raised as HostResolutionError naming the host."""
     error = socket.gaierror(11001, "getaddrinfo failed")
     with patch("scanner.socket.getaddrinfo", side_effect=error):
-        with pytest.raises(scanner.HostResolutionError, match="no-such-host.invalid"):
+        with pytest.raises(scanner.HostResolutionError,
+                           match=r"^Could not resolve host: no-such-host\.invalid \(.*getaddrinfo failed"):
             scanner.resolve_host("no-such-host.invalid")
 
 
@@ -242,8 +244,100 @@ def test_resolve_host_unicode_error_becomes_host_resolution_error() -> None:
     """An over-long label (UnicodeError from the idna codec) also becomes HostResolutionError."""
     host = "a" * 64 + ".com"
     with patch("scanner.socket.getaddrinfo", side_effect=UnicodeError("label too long")):
-        with pytest.raises(scanner.HostResolutionError, match=host):
+        with pytest.raises(scanner.HostResolutionError, match=rf"^Could not resolve host: {host} \("):
             scanner.resolve_host(host)
+
+
+# --- unscannable addresses: link-local IPv6, multicast, broadcast -------------
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("fe80::1", True),            # link-local IPv6 (start of fe80::/10)
+        ("febf::1", True),            # link-local IPv6 (end of fe80::/10)
+        ("ff05::2", True),            # IPv6 multicast
+        ("239.255.255.250", True),    # IPv4 multicast (SSDP)
+        ("255.255.255.255", True),    # IPv4 limited broadcast
+        ("fec0::1", False),           # old site-local, just past fe80::/10: a normal unicast host
+        ("::1", False),               # IPv6 loopback
+        ("169.254.1.1", False),       # IPv4 link-local works without a zone ID, so it's allowed
+        ("2001:db8::1", False),       # ordinary global-style IPv6
+        ("192.0.2.1", False),         # ordinary IPv4
+    ],
+)
+def test_is_unscannable_classifies_address(address: str, expected: bool) -> None:
+    """Only link-local IPv6, multicast and 255.255.255.255 count as unscannable."""
+    assert scanner.is_unscannable(ipaddress.ip_address(address)) is expected
+
+
+def test_resolve_host_link_local_only_name_raises_cant_scan() -> None:
+    """A name with only fe80:: addresses raises HostResolutionError naming the host and 'link-local'."""
+    entries = [_addrinfo(socket.AF_INET6, "fe80::1"), _addrinfo(socket.AF_INET6, "fe80::2")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        with pytest.raises(scanner.HostResolutionError, match=r"^Can't scan printer\.local: .*link-local"):
+            scanner.resolve_host("printer.local")
+
+
+def test_resolve_host_skips_link_local_and_uses_global_ipv6() -> None:
+    """fe80:: listed first is skipped; the following global IPv6 address is returned."""
+    entries = [_addrinfo(socket.AF_INET6, "fe80::1"), _addrinfo(socket.AF_INET6, "2001:db8::1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_host("dual.example") == (socket.AF_INET6, "2001:db8::1")
+
+
+def test_resolve_host_link_local_plus_ipv4_returns_ipv4() -> None:
+    """IPv4 is still preferred after link-local entries are filtered out."""
+    entries = [_addrinfo(socket.AF_INET6, "fe80::1"), _addrinfo(socket.AF_INET, "192.0.2.1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_host("mixed.example") == (socket.AF_INET, "192.0.2.1")
+
+
+def test_resolve_host_skips_scoped_link_local_entry() -> None:
+    """A link-local entry carrying a zone ID ('fe80::1%12', as Windows returns it) is also skipped."""
+    scoped = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::1%12", 0, 0, 12))
+    entries = [scoped, _addrinfo(socket.AF_INET6, "2001:db8::1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_host("scoped.example") == (socket.AF_INET6, "2001:db8::1")
+
+
+def test_resolve_host_scoped_link_local_only_raises() -> None:
+    """A name whose only address is a scoped fe80:: entry can't be scanned."""
+    scoped = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::1%12", 0, 0, 12))
+    with patch("scanner.socket.getaddrinfo", return_value=[scoped]):
+        with pytest.raises(scanner.HostResolutionError, match=r"^Can't scan scoped\.example"):
+            scanner.resolve_host("scoped.example")
+
+
+def test_resolve_host_multicast_only_name_raises() -> None:
+    """A name with only multicast addresses (IPv6 and IPv4) raises HostResolutionError."""
+    entries = [_addrinfo(socket.AF_INET6, "ff02::1"), _addrinfo(socket.AF_INET, "224.0.0.1")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        with pytest.raises(scanner.HostResolutionError, match=r"^Can't scan group\.example: .*multicast"):
+            scanner.resolve_host("group.example")
+
+
+def test_resolve_host_multicast_mixed_with_good_address_returns_good_one() -> None:
+    """Multicast entries are skipped; the ordinary address is returned."""
+    entries = [_addrinfo(socket.AF_INET, "224.0.0.1"), _addrinfo(socket.AF_INET6, "ff02::1"),
+               _addrinfo(socket.AF_INET6, "2001:db8::5")]
+    with patch("scanner.socket.getaddrinfo", return_value=entries):
+        assert scanner.resolve_host("mixed.example") == (socket.AF_INET6, "2001:db8::5")
+
+
+def test_resolve_host_empty_lookup_raises_no_addresses_error() -> None:
+    """An empty getaddrinfo() result is a HostResolutionError, not an IndexError."""
+    with patch("scanner.socket.getaddrinfo", return_value=[]):
+        with pytest.raises(scanner.HostResolutionError,
+                           match=r"^Could not resolve host: empty\.example \(the lookup returned no addresses\)$"):
+            scanner.resolve_host("empty.example")
+
+
+def test_resolve_host_link_local_literal_still_skips_dns() -> None:
+    """IP literals bypass DNS and the filter (main.valid_host rejects fe80:: before this point)."""
+    with patch("scanner.socket.getaddrinfo") as fake_dns:
+        assert scanner.resolve_host("fe80::1") == (socket.AF_INET6, "fe80::1")
+    fake_dns.assert_not_called()
 
 
 # --- scan_port address family -------------------------------------------------
@@ -301,6 +395,18 @@ def test_scan_ports_unresolvable_host_never_calls_scan_port() -> None:
     ):
         with pytest.raises(scanner.HostResolutionError):
             scanner.scan_ports("no-such-host.invalid", [22, 80, 443], workers=3)
+    fake_scan.assert_not_called()
+
+
+def test_scan_ports_link_local_only_host_never_calls_scan_port() -> None:
+    """scan_ports resolves via resolve_host, so a link-local-only name raises before any port scan."""
+    entries = [_addrinfo(socket.AF_INET6, "fe80::1")]
+    with (
+        patch("scanner.socket.getaddrinfo", return_value=entries),
+        patch("scanner.scan_port") as fake_scan,
+    ):
+        with pytest.raises(scanner.HostResolutionError, match=r"^Can't scan printer\.local"):
+            scanner.scan_ports("printer.local", [22, 80, 443], workers=3)
     fake_scan.assert_not_called()
 
 

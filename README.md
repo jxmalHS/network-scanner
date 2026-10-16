@@ -74,14 +74,16 @@ The details can contain text sent by the scanned host, so read them before shari
 IPv4 one (the report shows which, e.g. `Target: localhost (127.0.0.1)`). To check the IPv6
 address instead, pass it directly, e.g. `python main.py ::1`. The certificate's name check will
 then report a mismatch, because certificates are issued for names, not raw addresses.
-Link-local IPv6 addresses (`fe80::...`) aren't supported.
+Link-local IPv6 addresses (`fe80::...`) aren't supported: passing one is refused, and a host
+name's link-local addresses are skipped. If a name has no other address (common for `.local`
+printers and similar devices), the scan stops with exit code 1.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | Scan finished and the report was written (also `--help`, which scans nothing) |
-| 1 | The host name could not be resolved (no report written) |
+| 1 | The host name could not be resolved, or it has no address that can be scanned (no report written) |
 | 2 | Bad arguments, e.g. an invalid host, port or `--workers` value (nothing scanned) |
 | 3 | Internal error: a bug in the scanner stopped one or more checks. The report was still written, but those sections are incomplete. Run again with `--debug` to see the full error |
 | 4 | The report could not be saved (for example the folder isn't writable or the disk is full). The results were only shown on screen |

@@ -6,7 +6,7 @@ import re
 import signal
 import sys
 import traceback
-from scanner import DEFAULT_WORKERS, HostResolutionError, resolve_host, scan_ports
+from scanner import DEFAULT_WORKERS, HostResolutionError, is_unscannable, resolve_host, scan_ports
 from headers import check_headers
 from reporter import generate_report
 from redirects import check_open_redirect
@@ -31,8 +31,7 @@ def valid_host(value: str) -> str:
     if ip is not None:
         # Link-local IPv6 (fe80::/10), any multicast (IPv4 224.0.0.0/4, IPv6 ff00::/8) and the
         # IPv4 broadcast address aren't single hosts you can port-scan.
-        if ((ip.version == 6 and ip.is_link_local) or ip.is_multicast
-                or ip == ipaddress.ip_address("255.255.255.255")):
+        if is_unscannable(ip):
             raise argparse.ArgumentTypeError(
                 f"link-local, multicast and broadcast addresses (fe80::..., ff..::..., "
                 f"224-239.x.x.x, 255.255.255.255) aren't supported: they aren't a single host you "
@@ -116,7 +115,7 @@ def main() -> None:
             print("\n[!] Scan interrupted by keyboard input (Ctrl+C) — stopped early, no report was written")
         sys.exit(130)                  # 128 + 2 (SIGINT): the usual "stopped by Ctrl+C" code
     except HostResolutionError as e:
-        print(f"\n[!] Could not resolve host: {e}")   # no report: there is nothing to assess
+        print(f"\n[!] {e}")            # no report: there is nothing to assess
         sys.exit(1)
     except ReportSaveError as e:
         print(f"\n[!] Could not save the report: {e}. Check that this folder is writable "
